@@ -29,5 +29,13 @@ const monitorExecution = (req, res, next) => {
 // Apply monitoring middleware
 apiApp.use(monitorExecution);
 
+// Start local server if not in Vercel environment
+if (process.env.NODE_ENV !== 'production') {
+    const PORT = process.env.PORT || 5001;
+    apiApp.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+    });
+}
+
 // Export the Express app for Vercel
 module.exports = apiApp;
