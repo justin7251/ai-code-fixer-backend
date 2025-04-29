@@ -10,8 +10,21 @@ const xml2js = require('xml2js');
 const axios = require('axios');
 const auth = require('../middlewares/auth');
 
+// Middleware to handle JSON parsing errors
+router.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    console.error('JSON Parse Error:', err.message);
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Bad Request',
+      message: 'Invalid JSON in request body' 
+    });
+  }
+  next(err);
+});
+
 // Get supported languages
-router.get('/languages', (req, res) => {
+router.get('/languages', auth, (req, res) => {
     try {
         const supportedLanguages = Object.keys(LANGUAGE_RULESETS);
         
@@ -29,8 +42,88 @@ router.get('/languages', (req, res) => {
     }
 });
 
+// Generate PMD rules from docs 
+router.get('/rules/:language', auth, async (req, res) => {
+    try {
+        const language = req.params.language.toLowerCase();
+        
+        if (!LANGUAGE_RULESETS[language]) {
+            return res.status(400).json({
+                success: false,
+                message: `Unsupported language: ${language}`
+            });
+        }
+        
+        // Map language to PMD documentation URL
+        let docUrl;
+        if (language === 'typescript') {
+            // TypeScript uses the ECMAScript rules
+            docUrl = 'https://docs.pmd-code.org/latest/pmd_rules_ecmascript.html';
+        } else {
+            docUrl = `https://docs.pmd-code.org/latest/pmd_rules_${language}.html`;
+        }
+        
+        try {
+            // Fetch the documentation
+            const response = await axios.get(docUrl);
+            
+            res.json({
+                success: true,
+                language,
+                docsUrl: docUrl,
+                rulesets: LANGUAGE_RULESETS[language].split(',')
+            });
+        } catch (error) {
+            res.status(500).json({
+                success: false,
+                message: `Failed to fetch rules for ${language}`,
+                error: error.message
+            });
+        }
+    } catch (error) {
+        console.error('Get rules error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve rules',
+            error: error.message
+        });
+    }
+});
+
+// Get all analyses for a repository - MUST come before /:id route
+router.get('/repository/:repositoryId', auth, async (req, res) => {
+    try {
+        const repositoryId = req.params.repositoryId;
+        const analysesSnapshot = await db.collection('analysis')
+            .where('repositoryId', '==', repositoryId)
+            .where('userId', '==', req.user.id)
+            .orderBy('createdAt', 'desc')
+            .get();
+            
+        const analyses = [];
+        analysesSnapshot.forEach(doc => {
+            analyses.push({
+                id: doc.id,
+                ...doc.data()
+            });
+        });
+        
+    res.json({
+        success: true,
+            analyses
+        });
+    } catch (error) {
+        console.error('Get repository analyses error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve analyses for repository',
+            error: error.message
+        });
+    }
+});
+
 // Generate PMD report in different formats
-router.get('/:id/report/:format', async (req, res) => {
+router.get('/:id/report/:format', auth, async (req, res) => {
     try {
         const analysisId = req.params.id;
         const format = req.params.format.toLowerCase();
@@ -462,273 +555,8 @@ function generateFileListHtml(warnings) {
     return html;
 }
 
-// Generate all PMD rules from docs 
-router.get('/rules/:language', async (req, res) => {
-    try {
-        const language = req.params.language.toLowerCase();
-        
-        if (!LANGUAGE_RULESETS[language]) {
-            return res.status(400).json({
-                success: false,
-                message: `Unsupported language: ${language}`
-            });
-        }
-        
-        // Map language to PMD documentation URL
-        let docUrl;
-        if (language === 'typescript') {
-            // TypeScript uses the ECMAScript rules
-            docUrl = 'https://docs.pmd-code.org/latest/pmd_rules_ecmascript.html';
-        } else {
-            docUrl = `https://docs.pmd-code.org/latest/pmd_rules_${language}.html`;
-        }
-        
-        try {
-            // Fetch the documentation
-            const response = await axios.get(docUrl);
-            
-            res.json({
-                success: true,
-                language,
-                docsUrl: docUrl,
-                rulesets: LANGUAGE_RULESETS[language].split(',')
-            });
-        } catch (error) {
-            res.status(500).json({
-                success: false,
-                message: `Failed to fetch rules for ${language}`,
-                error: error.message
-            });
-        }
-    } catch (error) {
-        console.error('Get rules error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to retrieve rules',
-            error: error.message
-        });
-    }
-});
-
-// Create a new analysis with repository information
-router.post('/', async (req, res) => {
-    try {
-        const { repositoryId, repositoryName, userId, repositoryUrl, language, customRulesets } = req.body;
-        
-        if (!repositoryId || !repositoryName || !userId || !repositoryUrl) {
-            return res.status(400).json({
-                success: false,
-                message: 'Missing required fields'
-            });
-        }
-        
-        // Send immediate response to indicate the analysis has started
-        res.status(202).json({
-            success: true,
-            message: 'Analysis started',
-            repositoryId,
-            language: language || 'java'
-        });
-        
-        // Run the PMD scan asynchronously
-        console.log(`Starting analysis for repository ${repositoryId} with language ${language || 'java'}`);
-        
-        // Run PMD scan
-        const analysis = await scanRepository(
-            repositoryUrl, 
-            language || 'java',
-            customRulesets
-        );
-        
-        console.log(`PMD scan completed for repository ${repositoryId}`);
-        
-        // Create a separate document for detailed warnings
-        const warningsCollection = db.collection('analysis_warnings');
-        const warningsRef = await warningsCollection.add({
-            repositoryId,
-            warnings: analysis.warnings || [],
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-        
-        // Create the main analysis document with a reference to the warnings
-        const analysisData = {
-            repositoryId,
-            repositoryName,
-            userId,
-            repositoryUrl,
-            language: language || 'java',
-            warningsRef: warningsRef.id,
-            summary: analysis.summary || {
-                totalWarnings: analysis.warnings ? analysis.warnings.length : 0,
-                criticalCount: 0,
-                highCount: 0,
-                mediumCount: 0,
-                lowCount: 0,
-            },
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        };
-        
-        const analysisRef = await db.collection('analysis').add(analysisData);
-        
-        console.log(`Analysis saved to database with ID: ${analysisRef.id}`);
-        
-    } catch (error) {
-        console.error('Create analysis error:', error);
-        // Since we've already sent a response, we can't send another one
-        // Log the error for server-side debugging
-    }
-});
-
-/**
- * @route POST /api/analysis/:id
- * @description Run analysis on a given repository
- * @access Private
- */
-router.post('/:id', auth, async (req, res) => {
-    try {
-        const analysisId = req.params.id;
-        console.log(`[DEBUG] Starting analysis for repository ID: ${analysisId}`);
-        
-        // Get the repository from Firestore
-        const repoDoc = await db.collection('repositories').doc(analysisId).get();
-        
-        if (!repoDoc.exists) {
-            console.log(`[DEBUG] Repository ${analysisId} not found`);
-            return res.status(404).json({
-                success: false,
-                message: 'Repository not found'
-            });
-        }
-        
-        const repoData = repoDoc.data();
-        
-        // Check if the user has access to this repository
-        if (repoData.userId !== req.user?.id) {
-            console.log(`[DEBUG] Access denied: userId ${req.user?.id} doesn't match repository owner ${repoData.userId}`);
-            return res.status(403).json({
-                success: false,
-                message: 'Access denied'
-            });
-        }
-        
-        // Send initial response that the process has started
-        res.status(202).json({ 
-            success: true,
-            message: 'Analysis started',
-            status: 'pending',
-            id: analysisId
-        });
-        
-        let language = req.body.language || 'java';
-        
-        console.log(`[DEBUG] Starting scan for repository: ${repoData.name}, language: ${language}`);
-        
-        try {
-            // Run scan using sparse checkout to optimize storage
-            const scanResults = await scanRepository(repoData.url, language);
-            
-            console.log(`[DEBUG] Scan completed for repository: ${repoData.name}`);
-            
-            // Create a separate document for detailed warnings
-            const warningsCollection = db.collection('analysis_warnings');
-            const warningsRef = await warningsCollection.add({
-                repositoryId: analysisId,
-                warnings: scanResults.warnings || [],
-                fileContents: scanResults.fileContents || {},
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-            
-            // Create the main analysis document with a reference to the warnings
-            const analysisData = {
-                repositoryId: analysisId,
-                repositoryName: repoData.name || repoData.fullName,
-                userId: req.user?.id,
-                repositoryUrl: repoData.url,
-                language: language,
-                warningsRef: warningsRef.id,
-                status: 'completed',
-                summary: scanResults.summary || {
-                    totalWarnings: scanResults.warnings ? scanResults.warnings.length : 0,
-                    criticalCount: 0,
-                    highCount: 0,
-                    mediumCount: 0,
-                    lowCount: 0,
-                },
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            };
-            
-            const analysisRef = await db.collection('analysis').add(analysisData);
-            
-            console.log(`[DEBUG] Analysis saved to database with ID: ${analysisRef.id}`);
-            
-            // Update repository with the last analysis reference
-            await db.collection('repositories').doc(analysisId).update({
-                lastAnalysis: analysisRef.id,
-                lastAnalysisDate: admin.firestore.FieldValue.serverTimestamp(),
-                status: 'completed',
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-            
-        } catch (scanError) {
-            console.error(`[ERROR] Error in scan: ${scanError.message}`);
-            
-            // Update repository status to 'failed'
-            await db.collection('repositories').doc(analysisId).update({
-                status: 'failed',
-                errorMessage: scanError.message,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-        }
-        
-    } catch (error) {
-        console.error(`[ERROR] Error in analysis: ${error.message}`);
-        // We can't send a response here as we already sent one
-    }
-});
-
-// Get analysis by ID
-router.get('/:id', async (req, res) => {
-    try {
-        const analysisId = req.params.id;
-        const analysisDoc = await db.collection('analysis').doc(analysisId).get();
-        
-        if (!analysisDoc.exists) {
-            return res.status(404).json({
-                success: false,
-                message: 'Analysis not found'
-            });
-        }
-        
-        const analysisData = analysisDoc.data();
-        
-        // Check if user has access to this analysis
-        if (analysisData.userId !== req.user.id) {
-            return res.status(403).json({
-                success: false,
-                message: 'Access denied'
-            });
-        }
-        
-        res.json({
-            success: true,
-            analysis: analysisData
-        });
-    } catch (error) {
-        console.error('Get analysis error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to retrieve analysis',
-            error: error.message
-        });
-    }
-});
-
 // Get detailed warnings for an analysis
-router.get('/:id/warnings', async (req, res) => {
+router.get('/:id/warnings', auth, async (req, res) => {
     try {
         const analysisId = req.params.id;
         const analysisDoc = await db.collection('analysis').doc(analysisId).get();
@@ -780,43 +608,7 @@ router.get('/:id/warnings', async (req, res) => {
     }
 });
 
-// Get all analyses for a repository
-router.get('/repository/:repositoryId', async (req, res) => {
-    try {
-        const repositoryId = req.params.repositoryId;
-        const analysesSnapshot = await db.collection('analysis')
-            .where('repositoryId', '==', repositoryId)
-            .where('userId', '==', req.user.id)
-            .orderBy('createdAt', 'desc')
-            .get();
-            
-        const analyses = [];
-        analysesSnapshot.forEach(doc => {
-            analyses.push({
-                id: doc.id,
-                ...doc.data()
-            });
-        });
-        
-    res.json({
-        success: true,
-            analyses
-        });
-    } catch (error) {
-        console.error('Get repository analyses error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to retrieve analyses for repository',
-            error: error.message
-        });
-    }
-});
-
-/**
- * @route GET /api/analysis/:id/file/:file
- * @description Get the content of a specific file from a repository
- * @access Private
- */
+// Get file content from analysis
 router.get('/:id/file/:file', auth, async (req, res) => {
     try {
         const analysisId = req.params.id;
@@ -909,6 +701,227 @@ router.get('/:id/file/:file', auth, async (req, res) => {
             message: 'Error getting file content', 
             error: error.message 
         });
+    }
+});
+
+// Get analysis by ID (keep this after more specific /:id/... routes)
+router.get('/:id', auth, async (req, res) => {
+    try {
+        const analysisId = req.params.id;
+        console.log(`[DEBUG] Fetching analysis with ID: ${analysisId}`);
+        
+        const analysisDoc = await db.collection('analysis').doc(analysisId).get();
+        
+        if (!analysisDoc.exists) {
+            console.log(`[DEBUG] Analysis ${analysisId} not found`);
+            return res.status(404).json({
+                success: false,
+                message: 'Analysis not found'
+            });
+        }
+        
+        const analysisData = analysisDoc.data();
+        
+        // Check if user has access to this analysis
+        if (analysisData.userId !== req.user.id) {
+            console.log(`[DEBUG] Access denied: userId ${req.user.id} doesn't match analysis owner ${analysisData.userId}`);
+            return res.status(403).json({
+                success: false,
+                message: 'Access denied'
+            });
+        }
+        
+        res.json({
+            success: true,
+            analysis: analysisData
+        });
+    } catch (error) {
+        console.error('[ERROR] Get analysis error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve analysis',
+            error: error.message
+        });
+    }
+});
+
+// Create a new analysis with repository information
+router.post('/', async (req, res) => {
+    try {
+        const { repositoryId, repositoryName, userId, repositoryUrl, language, customRulesets } = req.body;
+        
+        if (!repositoryId || !repositoryName || !userId || !repositoryUrl) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required fields'
+            });
+        }
+        
+        // Send immediate response to indicate the analysis has started
+        res.status(202).json({
+            success: true,
+            message: 'Analysis started',
+            repositoryId,
+            language: language || 'java'
+        });
+        
+        // Run the PMD scan asynchronously
+        console.log(`Starting analysis for repository ${repositoryId} with language ${language || 'java'}`);
+        
+        // Run PMD scan
+        const analysis = await scanRepository(
+            repositoryUrl, 
+            language || 'java',
+            customRulesets
+        );
+        
+        console.log(`PMD scan completed for repository ${repositoryId}`);
+        
+        // Create a separate document for detailed warnings
+        const warningsCollection = db.collection('analysis_warnings');
+        const warningsRef = await warningsCollection.add({
+            repositoryId,
+            warnings: analysis.warnings || [],
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        
+        // Create the main analysis document with a reference to the warnings
+        const analysisData = {
+            repositoryId,
+            repositoryName,
+            userId,
+            repositoryUrl,
+            language: language || 'java',
+            warningsRef: warningsRef.id,
+            summary: analysis.summary || {
+                totalWarnings: analysis.warnings ? analysis.warnings.length : 0,
+                criticalCount: 0,
+                highCount: 0,
+                mediumCount: 0,
+                lowCount: 0,
+            },
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        };
+        
+        const analysisRef = await db.collection('analysis').add(analysisData);
+        
+        console.log(`Analysis saved to database with ID: ${analysisRef.id}`);
+        
+    } catch (error) {
+        console.error('Create analysis error:', error);
+        // Since we've already sent a response, we can't send another one
+        // Log the error for server-side debugging
+    }
+});
+
+/**
+ * @route POST /api/analysis/:id
+ * @description Run analysis on a given repository
+ * @access Private
+ */
+router.post('/:id', auth, async (req, res) => {
+    try {
+        const analysisId = req.params.id;
+        console.log(`[DEBUG] Starting analysis for repository ID: ${analysisId}`);
+        
+        // Get the repository from Firestore
+        const repoDoc = await db.collection('repositories').doc(analysisId).get();
+        
+        if (!repoDoc.exists) {
+            console.log(`[DEBUG] Repository ${analysisId} not found`);
+            return res.status(404).json({
+                success: true,
+                message: 'Repository not found'
+            });
+        }
+        
+        const repoData = repoDoc.data();
+        
+        // Check if the user has access to this repository
+        if (repoData.userId !== req.user?.id) {
+            console.log(`[DEBUG] Access denied: userId ${req.user?.id} doesn't match repository owner ${repoData.userId}`);
+            return res.status(403).json({
+                success: false,
+                message: 'Access denied'
+            });
+        }
+        
+        // Send initial response that the process has started
+        res.status(202).json({ 
+            success: true,
+            message: 'Analysis started',
+            status: 'pending',
+            id: analysisId
+        });
+        
+        let language = req.body.language || 'java';
+        
+        console.log(`[DEBUG] Starting scan for repository: ${repoData.name}, language: ${language}`);
+        
+        try {
+            // Run scan using sparse checkout to optimize storage
+            const scanResults = await scanRepository(repoData.url, language);
+            
+            console.log(`[DEBUG] Scan completed for repository: ${repoData.name}`);
+            
+            // Create a separate document for detailed warnings
+            const warningsCollection = db.collection('analysis_warnings');
+            const warningsRef = await warningsCollection.add({
+                repositoryId: analysisId,
+                warnings: scanResults.warnings || [],
+                fileContents: scanResults.fileContents || {},
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            
+            // Create the main analysis document with a reference to the warnings
+            const analysisData = {
+                repositoryId: analysisId,
+                repositoryName: repoData.name || repoData.fullName,
+                userId: req.user?.id,
+                repositoryUrl: repoData.url,
+                language: language,
+                warningsRef: warningsRef.id,
+                status: 'completed',
+                summary: scanResults.summary || {
+                    totalWarnings: scanResults.warnings ? scanResults.warnings.length : 0,
+                    criticalCount: 0,
+                    highCount: 0,
+                    mediumCount: 0,
+                    lowCount: 0,
+                },
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            };
+            
+            const analysisRef = await db.collection('analysis').add(analysisData);
+            
+            console.log(`[DEBUG] Analysis saved to database with ID: ${analysisRef.id}`);
+            
+            // Update repository with the last analysis reference
+            await db.collection('repositories').doc(analysisId).update({
+                lastAnalysis: analysisRef.id,
+                lastAnalysisDate: admin.firestore.FieldValue.serverTimestamp(),
+                status: 'completed',
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            
+        } catch (scanError) {
+            console.error(`[ERROR] Error in scan: ${scanError.message}`);
+            
+            // Update repository status to 'failed'
+            await db.collection('repositories').doc(analysisId).update({
+                status: 'failed',
+                errorMessage: scanError.message,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+        }
+        
+    } catch (error) {
+        console.error(`[ERROR] Error in analysis: ${error.message}`);
+        // We can't send a response here as we already sent one
     }
 });
 
