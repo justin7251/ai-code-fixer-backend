@@ -96,14 +96,22 @@ function extractCodeContext(fileContent, lineNumber, contextLines = 5) {
  * @returns {string} The prompt for the AI
  */
 function constructFixPrompt(issue, codeContext, language) {
+    const {
+        message = 'No description provided',
+        rule = 'N/A',
+        severity = 'unknown',
+        line = '?',
+        column
+    } = issue;
+
     return `You are an expert code reviewer and fixer. Your task is to fix code issues without changing functionality. Provide concise, targeted fixes.
 
 Fix the following ${language} code issue:
 
-Issue: ${issue.message}
-Rule: ${issue.rule}
-Severity: ${issue.severity}
-Line ${issue.line}${issue.column ? `, Column ${issue.column}` : ''}
+Issue: ${message}
+Rule: ${rule}
+Severity: ${severity}
+Line ${line}${column != null ? `, Column ${column}` : ''}
 
 Code:
 \`\`\`${language}
@@ -114,6 +122,7 @@ Please provide a fixed version of the code that addresses the issue.
 Only include the fixed code snippet, not explanations.
 `;
 }
+
 
 /**
  * Calculate confidence score for a suggested fix
