@@ -28,9 +28,10 @@ async function analyzeCode(repoUrl, language, options = {}) {
         if (!repoDetails) {
             throw new Error(`Invalid GitHub repository URL: ${repoUrl}`);
         }
-        
+        const start = Date.now();
         // Use sparse checkout instead of full clone
         await sparseCheckout(repoUrl, tempDir, language, options.specificFiles);
+        console.log(`Sparse checkout took ${(Date.now() - start) / 1000}s`);
         
         // Select the appropriate analysis tool based on language
         let results;
@@ -54,7 +55,7 @@ async function analyzeCode(repoUrl, language, options = {}) {
         
         // Process results to a standard format
         const standardResults = standardizeResults(results, language);
-        
+        console.log(`standardResults:  ${standardResults}`);
         // Add file contents for files with issues (for AI fixing)
         await addFileContents(standardResults, tempDir);
         
@@ -104,8 +105,12 @@ function extractRepoDetailsFromUrl(url) {
  */
 async function sparseCheckout(repoUrl, directory, language, specificFiles = []) {
     try {
+        console.log(`Initializing git repo ${directory}...`);
         // Initialize git repo
-        await execPromise(`git init`, { cwd: directory });
+        const { stdout, stderr } = await execPromise('git init', { cwd: directory });
+
+        if (stdout) console.log('stdout:', stdout);
+        if (stderr) console.error('stderr:', stderr);
         
         // Add remote
         await execPromise(`git remote add origin ${repoUrl}`, { cwd: directory });
@@ -113,6 +118,7 @@ async function sparseCheckout(repoUrl, directory, language, specificFiles = []) 
         // Enable sparse checkout
         await execPromise(`git config core.sparseCheckout true`, { cwd: directory });
         
+        console.log(`Initializing git sparseCheckout...`);
         // Create sparse-checkout file with patterns based on language
         const patterns = specificFiles.length > 0 
             ? specificFiles 
@@ -391,6 +397,8 @@ function standardizeResults(results, language) {
                 // Normalize file path
                 const relativeFilePath = normalizePath(file.filePath);
                 
+                console.log(`relativeFilePath:  ${relativeFilePath}`);
+
                 file.messages.forEach(message => {
                     standardResults.issues.push({
                         file: relativeFilePath,
@@ -401,6 +409,7 @@ function standardizeResults(results, language) {
                         message: message.message
                     });
                 });
+                console.log(`standardResults:  ${standardResults}`);
             });
             break;
             
