@@ -41,6 +41,8 @@ router.post('/', async (req, res) => {
         const userId = req.user.githubId;
         const { name, fullName, description, url, private: isPrivate } = req.body;
 
+        console.log(req.body);
+
         if (!name || !fullName || !url) {
             return res.status(400).json({
                 success: false,
