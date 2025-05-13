@@ -1,7 +1,5 @@
 const admin = require('firebase-admin');
 
-// Initialize Firebase Admin only if it hasn't been initialized yet
-let firebaseAdmin;
 if (!admin.apps.length) {
     const serviceAccount = {
         type: process.env.FIREBASE_TYPE,
@@ -16,11 +14,11 @@ if (!admin.apps.length) {
         client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL
     };
 
-    firebaseAdmin = admin.initializeApp({
+    admin.initializeApp({
         credential: admin.credential.cert(serviceAccount)
     });
 } else {
-    firebaseAdmin = admin.app();
+    admin.app();
 }
 
-module.exports = firebaseAdmin; 
+module.exports = admin; 
