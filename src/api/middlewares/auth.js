@@ -7,7 +7,7 @@ function authenticateToken(req, res, next) {
         console.log('[DEBUG] Request headers:', JSON.stringify(req.headers, null, 2));
 
         const authHeader = req.headers["authorization"];
-        
+        console.log('[DEBUG] Body', req.body);
         if (!authHeader) {
             console.log('[DEBUG] No authorization header found');
             return res.status(401).json({
