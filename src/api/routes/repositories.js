@@ -39,7 +39,7 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
     try {
         const userId = req.user.githubId;
-        const { name, fullName, description, url, private: isPrivate } = req.body;
+        const { name, fullName, repositoryId, description, url, private: isPrivate } = req.body;
 
         if (!name || !fullName || !url) {
             return res.status(400).json({
@@ -49,7 +49,7 @@ router.post('/', async (req, res) => {
             });
         }
 
-        const userReposRef = db.collection('users').doc(String(userId)).collection('repositories');
+        const userReposRef = db.collection('users').doc(String(userId)).collection('repositories').doc(repositoryId);
         const newRepoRef = await userReposRef.add({
             name,
             fullName,
