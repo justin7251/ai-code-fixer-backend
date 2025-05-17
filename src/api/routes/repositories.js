@@ -39,18 +39,19 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
     try {
         const userId = req.user.githubId;
-        const { name, fullName, repositoryId, description, url, private: isPrivate } = req.body;
+        const { name, fullName, repoId, description, url, private: isPrivate } = req.body;
 
-        if (!name || !fullName || !url) {
+        if (!name || !fullName || !url || !repoId) {
             return res.status(400).json({
                 success: false,
                 error: 'Missing required fields',
                 message: 'Repository name, full name, and URL are required'
             });
         }
+        console.log(repoId);
 
-        const userReposRef = db.collection('users').doc(String(userId)).collection('repositories').doc(repositoryId);
-        const newRepoRef = await userReposRef.add({
+        const userReposRef = db.collection('users').doc(String(userId)).collection('repositories').doc(String(repoId));
+        await userReposRef.set({
             name,
             fullName,
             description: description || '',
@@ -60,7 +61,7 @@ router.post('/', async (req, res) => {
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
-        const newRepo = await newRepoRef.get();
+        const newRepo = await userReposRef.get();
         res.status(201).json({
             success: true,
             repository: {
