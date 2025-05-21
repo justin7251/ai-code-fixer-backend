@@ -39,6 +39,7 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
     try {
         const userId = req.user.githubId;
+
         const { name, fullName, repoId, description, url, private: isPrivate } = req.body;
 
         if (!name || !fullName || !url || !repoId) {
@@ -48,7 +49,7 @@ router.post('/', async (req, res) => {
                 message: 'Repository name, full name, and URL are required'
             });
         }
-        console.log(repoId);
+
 
         const userReposRef = db.collection('users').doc(String(userId)).collection('repositories').doc(String(repoId));
         await userReposRef.set({
