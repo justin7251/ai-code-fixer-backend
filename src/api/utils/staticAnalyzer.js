@@ -6,6 +6,14 @@ const fs = require('fs').promises;
 const os = require('os');
 const axios = require('axios');
 
+const analyzers = {
+    javascript: runESLint,
+    typescript: runESLint,
+    java: runPMD,
+    python: runPyLint,
+    php: runPHPLint
+};
+
 /**
  * Runs static code analysis with different tools based on language
  * @param {string} repoUrl - URL of the GitHub repository
@@ -34,24 +42,9 @@ async function analyzeCode(repoUrl, language, options = {}) {
         console.log(`Sparse checkout took ${(Date.now() - start) / 1000}s`);
         
         // Select the appropriate analysis tool based on language
-        let results;
-        switch (language.toLowerCase()) {
-            case 'javascript':
-            case 'typescript':
-                results = await runESLint(tempDir, options);
-                break;
-            case 'java':
-                results = await runPMD(tempDir, options);
-                break;
-            case 'python':
-                results = await runPyLint(tempDir, options);
-                break;
-            case 'php':
-                results = await runPHPLint(tempDir, options);
-                break;
-            default:
-                throw new Error(`Unsupported language: ${language}`);
-        }
+        const analyzer = analyzers[language.toLowerCase()];
+        if (!analyzer) throw new Error(`Unsupported language: ${language}`);
+        const results = await analyzer(tempDir, options);
         
         // Process results to a standard format
         const standardResults = standardizeResults(results, language);
