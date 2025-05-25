@@ -1,6 +1,7 @@
 const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
+const simpleGit = require('simple-git');
 const path = require('path');
 const fs = require('fs').promises;
 const os = require('os');
@@ -29,6 +30,7 @@ async function analyzeCode(repoUrl, language, options = {}) {
         const tempDir = path.join(os.tmpdir(), `code-analysis-${Date.now()}`);
         await fs.mkdir(tempDir, { recursive: true });
         
+        console.log(`static Analyzer`);
         console.log(`Created temporary directory: ${tempDir}`);
         
         // Extract repo details from URL
@@ -97,40 +99,43 @@ function extractRepoDetailsFromUrl(url) {
  * @param {Array} specificFiles - Optional list of specific files to checkout
  */
 async function sparseCheckout(repoUrl, directory, language, specificFiles = []) {
+    const git = simpleGit({ baseDir: directory });
     try {
-        console.log(`Initializing git repo ${directory}...`);
-        // Initialize git repo
-        const { stdout, stderr } = await execPromise('git init', { cwd: directory });
+        console.log(`Initializing git repo in ${directory}...`);
 
-        if (stdout) console.log('stdout:', stdout);
-        if (stderr) console.error('stderr:', stderr);
-        
+        // Initialize repo
+        await git.init();
+
         // Add remote
-        await execPromise(`git remote add origin ${repoUrl}`, { cwd: directory });
-        
-        // Enable sparse checkout
-        await execPromise(`git config core.sparseCheckout true`, { cwd: directory });
-        
-        console.log(`Initializing git sparseCheckout...`);
-        // Create sparse-checkout file with patterns based on language
-        const patterns = specificFiles.length > 0 
-            ? specificFiles 
+        await git.addRemote('origin', repoUrl);
+
+        // Enable sparse-checkout mode
+        await git.raw(['config', 'core.sparseCheckout', 'true']);
+
+        console.log(`Setting up sparse-checkout patterns...`);
+
+        // Generate patterns
+        const patterns = specificFiles.length > 0
+            ? specificFiles
             : generateFilePatterns(language);
-        
-        await fs.writeFile(
-            path.join(directory, '.git', 'info', 'sparse-checkout'),
-            patterns.join('\n')
-        );
-        
-        // Fetch and checkout
-        await execPromise(`git fetch --depth=1 origin main`, { cwd: directory })
-            .catch(() => execPromise(`git fetch --depth=1 origin master`, { cwd: directory }));
-        
-        await execPromise(`git checkout FETCH_HEAD`, { cwd: directory });
-        
-        console.log(`Sparse checkout completed for ${repoUrl} with ${patterns.length} patterns`);
+
+        // Write patterns to sparse-checkout file
+        const sparseFilePath = path.join(directory, '.git', 'info', 'sparse-checkout');
+        await fs.writeFile(sparseFilePath, patterns.join('\n'), 'utf8');
+
+        // Fetch (trying main, fallback to master)
+        try {
+            await git.fetch(['--depth=1', 'origin', 'main']);
+        } catch {
+            await git.fetch(['--depth=1', 'origin', 'master']);
+        }
+
+        // Checkout FETCH_HEAD
+        await git.checkout('FETCH_HEAD');
+
+        console.log(`✅ Sparse checkout completed for ${repoUrl} with ${patterns.length} patterns`);
     } catch (error) {
-        console.error('Sparse checkout error:', error);
+        console.error('❌ Sparse checkout error:', error);
         throw new Error(`Repository checkout failed: ${error.message}`);
     }
 }
