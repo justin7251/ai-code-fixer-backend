@@ -116,32 +116,35 @@ router.post('/analyze/:repositoryId', async (req, res) => {
         // Get repository info from the database
         const repoDoc = await db.collection('repositories').doc(repositoryId).get();
         
-        if (!repoDoc.exists) {
-            return res.status(404).json({
-                success: false,
-                message: 'Repository not found'
-            });
-        }
+        // if (!repoDoc.exists) {
+        //     return res.status(404).json({
+        //         success: false,
+        //         message: 'Repository not found'
+        //     });
+        // }
         
-        const repoData = repoDoc.data();
+        // const repoData = repoDoc.data();
         
-        // Check if user has access to this repository
-        if (repoData.userId !== req.user?.id) {
-            return res.status(403).json({
-                success: false,
-                message: 'Access denied'
-            });
-        }
+        // // Check if user has access to this repository
+        // if (repoData.userId !== req.user?.id) {
+        //     return res.status(403).json({
+        //         success: false,
+        //         message: 'Access denied'
+        //     });
+        // }
         
-        const repositoryUrl = repoData.url || repoData.html_url;
+        //const repositoryUrl = repoData.url || repoData.html_url;
+        const repositoryUrl = "https://github.com/justin7251/aj-inventory-system";
         
         // Detect language if not specified
-        let detectedLanguage = language;
-        if (!detectedLanguage && repoData.language) {
-            detectedLanguage = repoData.language.toLowerCase();
-        } else {
-            detectedLanguage = 'javascript'; // Default
-        }
+        // let detectedLanguage = language;
+        // if (!detectedLanguage && repoData.language) {
+        //     detectedLanguage = repoData.language.toLowerCase();
+        // } else {
+        //     detectedLanguage = 'javascript'; // Default
+        // }
+
+        const detectedLanguage = 'javascript';
         
         // Send immediate response
         res.status(202).json({
