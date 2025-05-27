@@ -98,47 +98,122 @@ function extractRepoDetailsFromUrl(url) {
  * @param {string} language - Programming language
  * @param {Array} specificFiles - Optional list of specific files to checkout
  */
-async function sparseCheckout(repoUrl, directory, language, specificFiles = []) {
-    const git = simpleGit({ baseDir: directory });
+/**
+ * Performs a sparse checkout of a Git repository.
+ * @param {string} repoUrl - The URL of the Git repository (e.g., 'https://github.com/user/repo.git').
+ * @param {string} directory - The local directory where the sparse checkout should happen.
+ * @param {string} language - Used by generateFilePatterns to determine patterns.
+ * @param {string[]} [specificFiles=[]] - Optional array of specific files/patterns to include.
+ * @param {string} [branch='main'] - The branch to checkout (defaults to 'main').
+ * @returns {Promise<string>} - Resolves with the path to the cloned directory on success.
+ */
+async function sparseCheckout(repoUrl, fullTargetDirPath, language, specificFiles = [], branch = 'main') {
+
+    let git;
+
     try {
-        console.log(`Initializing git repo in ${directory}...`);
+        console.log(`[START] Starting sparse checkout for ${repoUrl} into ${fullTargetDirPath}`);
 
-        // Initialize repo
+ 
+        git = simpleGit({
+            baseDir: fullTargetDirPath,
+            // You can add a timeout for Git commands if they often hang
+            // timeout: {
+            //     block: 10000 // 10 seconds for a single command to complete
+            // },
+            // If git.exe is not in your PATH, you can specify its full path here
+            // binary: 'C:\\Program Files\\Git\\bin\\git.exe' // <-- UNCOMMENT AND ADJUST IF NEEDED
+        });
+        console.log(`[SG_INIT_DONE] simple-git instance initialized.`);
+
+        // 4. Initialize local Git repo
+        console.log(`[GIT_INIT] Initializing git repo in ${fullTargetDirPath}...`);
         await git.init();
+        console.log(`[GIT_INIT_DONE] Git repo initialized.`);
 
-        // Add remote
+        // 5. Add remote
+        console.log(`[GIT_REMOTE] Adding remote 'origin' (${repoUrl})...`);
         await git.addRemote('origin', repoUrl);
+        console.log(`[GIT_REMOTE_DONE] Remote added.`);
 
-        // Enable sparse-checkout mode
+        // 6. Enable sparse-checkout mode
+        console.log(`[GIT_CONFIG] Enabling sparse-checkout mode...`);
         await git.raw(['config', 'core.sparseCheckout', 'true']);
+        console.log(`[GIT_CONFIG_DONE] Sparse-checkout enabled.`);
 
-        console.log(`Setting up sparse-checkout patterns...`);
-
-        // Generate patterns
+        // 7. Generate patterns
+        console.log(`[PATTERNS] Setting up sparse-checkout patterns...`);
         const patterns = specificFiles.length > 0
             ? specificFiles
             : generateFilePatterns(language);
 
-        // Write patterns to sparse-checkout file
-        const sparseFilePath = path.join(directory, '.git', 'info', 'sparse-checkout');
+        // 8. Write patterns to sparse-checkout file
+        const sparseFilePath = path.join(fullTargetDirPath, '.git', 'info', 'sparse-checkout');
+        console.log(`[FS_WRITE] Writing patterns to ${sparseFilePath}:`, patterns);
         await fs.writeFile(sparseFilePath, patterns.join('\n'), 'utf8');
+        console.log(`[FS_WRITE_DONE] Patterns written.`);
 
-        // Fetch (trying main, fallback to master)
+        // 9. Determine the actual branch to use and fetch/checkout
+        let actualBranch = branch;
+        console.log(`[BRANCH_CHECK] Checking for remote branches to confirm '${branch}'...`);
         try {
-            await git.fetch(['--depth=1', 'origin', 'main']);
-        } catch {
-            await git.fetch(['--depth=1', 'origin', 'master']);
+            const remoteBranches = await git.listRemote(['--heads', 'origin']);
+            if (!remoteBranches.includes(`refs/heads/${branch}`)) {
+                console.warn(`[WARN] Specified branch '${branch}' not found on remote. Trying 'main' or 'master'.`);
+                if (remoteBranches.includes('refs/heads/main')) {
+                    actualBranch = 'main';
+                } else if (remoteBranches.includes('refs/heads/master')) {
+                    actualBranch = 'master';
+                } else {
+                    console.error('[ERROR] Neither specified branch, "main", nor "master" found on remote.');
+                    throw new Error(`Cannot find a suitable branch on remote.`);
+                }
+            }
+            console.log(`[BRANCH_RESOLVED] Will fetch and checkout branch: ${actualBranch}`);
+        } catch (branchError) {
+            console.warn(`[WARN] Could not determine remote branches: ${branchError.message}. Proceeding with initial branch: ${branch}. This might indicate network or authentication issues.`);
+            // Proceed with the initial `branch` value.
         }
 
-        // Checkout FETCH_HEAD
-        await git.checkout('FETCH_HEAD');
+        // 10. Fetch the remote repository (shallow clone for efficiency)
+        console.log(`[GIT_FETCH] Fetching branch '${actualBranch}' from origin with depth=1...`);
+        await git.fetch('origin', actualBranch, ['--depth=1']);
+        console.log(`[GIT_FETCH_DONE] Fetch completed.`);
 
-        console.log(`✅ Sparse checkout completed for ${repoUrl} with ${patterns.length} patterns`);
+        // 11. Checkout the desired branch. This is where sparse-checkout rules apply.
+        console.log(`[GIT_CHECKOUT] Checking out branch '${actualBranch}'...`);
+        await git.checkout(actualBranch);
+        console.log(`[GIT_CHECKOUT_DONE] Checkout completed.`);
+
+        console.log(`[SUCCESS] ✅ Sparse checkout completed for ${repoUrl} into ${fullTargetDirPath}`);
+        return fullTargetDirPath;
+
     } catch (error) {
         console.error('❌ Sparse checkout error:', error);
-        throw new Error(`Repository checkout failed: ${error.message}`);
+        // Log more detailed error properties if available
+        if (error.stack) console.error('Error Stack:', error.stack);
+        if (error.message) console.error('Error Message:', error.message);
+        if (error.command) console.error('Git Command that failed:', error.command);
+        if (error.stdout) console.error('Git stdout:', error.stdout);
+        if (error.stderr) console.error('Git stderr:', error.stderr);
+        if (error.code) console.error('Exit Code:', error.code);
+        if (error.exitCode) console.error('simple-git exitCode:', error.exitCode);
+
+        // Optional: Clean up partially cloned directory on error
+        try {
+            const stats = await fs.stat(fullTargetDirPath).catch(() => null); // Catch if dir doesn't exist
+            if (stats && stats.isDirectory()) {
+                console.log(`[CLEANUP] Cleaning up ${fullTargetDirPath} due to error.`);
+                await fs.rm(fullTargetDirPath, { recursive: true, force: true });
+                console.log(`[CLEANUP_DONE] Directory cleaned.`);
+            }
+        } catch (cleanupErr) {
+            console.error(`[CLEANUP_ERROR] Error during cleanup: ${cleanupErr.message}`);
+        }
+        throw new Error(`Repository sparse checkout failed: ${error.message}`);
     }
 }
+
 
 /**
  * Generate file patterns for sparse checkout based on language
