@@ -117,12 +117,11 @@ async function sparseCheckout(repoUrl, fullTargetDirPath, language, specificFile
  
         git = simpleGit({
             baseDir: fullTargetDirPath,
+            binary: 'C:\\Program Files\\Git\\bin\\git.exe',
             // You can add a timeout for Git commands if they often hang
-            // timeout: {
-            //     block: 10000 // 10 seconds for a single command to complete
-            // },
-            // If git.exe is not in your PATH, you can specify its full path here
-            // binary: 'C:\\Program Files\\Git\\bin\\git.exe' // <-- UNCOMMENT AND ADJUST IF NEEDED
+            timeout: {
+                block: 10000
+            },
         });
         console.log(`[SG_INIT_DONE] simple-git instance initialized.`);
 
