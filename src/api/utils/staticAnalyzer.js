@@ -117,7 +117,10 @@ async function sparseCheckout(repoUrl, fullTargetDirPath, language, specificFile
  
         git = simpleGit({
             baseDir: fullTargetDirPath,
-            binary: 'C:\\Program Files\\Git\\bin\\git.exe',
+            binary: 'C:/Program Files/Git/bin/git.exe',
+            unsafe: {
+                allowUnsafeCustomBinary: true
+            },
             // You can add a timeout for Git commands if they often hang
             timeout: {
                 block: 10000
