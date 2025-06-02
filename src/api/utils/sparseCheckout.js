@@ -16,37 +16,75 @@ const TEMP_DIR = path.join(os.tmpdir(), 'ai-code-fixer-repos');
  * @returns {Promise<string>} - Path to the checked out repository
  */
 async function sparseCheckout(repoUrl, patterns, branch = 'main') {
-    try {
-        // Create a unique directory name based on repo URL
-        const repoHash = Buffer.from(repoUrl).toString('base64').replace(/[\/\+\=]/g, '');
-        const repoDir = path.join(TEMP_DIR, repoHash);
+    // Validate repoUrl
+    const repoUrlRegex = /^[a-zA-Z0-9.:/@\-_]+$/;
+    if (!repoUrlRegex.test(repoUrl)) {
+        throw new Error(`Invalid repository URL format: ${repoUrl}`);
+    }
 
-        // Create temp directory if it doesn't exist
+    // Validate branch name
+    // Allows alphanumeric, slashes, dots, underscores, hyphens.
+    // Disallows control characters, spaces, consecutive slashes, consecutive dots,
+    // starting/ending with slash or dot.
+    const branchRegex = /^(?!.*(\.\.| |\/\/|\/\.|\.$|\/$|\^|~|:|\?|\[))[a-zA-Z0-9\/._-]+$/;
+    if (!branchRegex.test(branch)) {
+        throw new Error(`Invalid branch name: ${branch}`);
+    }
+
+    // Validate patterns
+    const patternRegex = /^[a-zA-Z0-9*?\/._-]+$/;
+    if (!Array.isArray(patterns) || patterns.some(pattern => !patternRegex.test(pattern))) {
+        throw new Error('Invalid characters in patterns. Only alphanumeric, *, ?, /, ., _, - are allowed.');
+    }
+
+    try {
+        // Create a unique directory name for each invocation to prevent race conditions
+        const repoHash = Buffer.from(repoUrl).toString('base64').replace(/[\/\+\=]/g, '');
+        const uniqueSuffix = `-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        const repoDir = path.join(TEMP_DIR, repoHash + uniqueSuffix);
+
+        // Create temp directory if it doesn't exist (this is for TEMP_DIR itself)
         await fs.mkdir(TEMP_DIR, { recursive: true });
 
-        // Check if the directory already exists
-        try {
-            await fs.access(repoDir);
-            // If it exists, remove it to ensure a clean checkout
-            await fs.rm(repoDir, { recursive: true, force: true });
-        } catch (error) {
-            // Directory doesn't exist, which is fine
-        }
-
-        // Create the repository directory
+        // Create the unique repository directory. 
+        // No need to check for existence or pre-remove, as it's unique.
         await fs.mkdir(repoDir, { recursive: true });
         
         // Initialize git repository
         console.log(`Initializing git repository in ${repoDir}...`);
-        execSync('git init', { cwd: repoDir });
+        try {
+            const stdout = execSync('git init', { cwd: repoDir });
+            console.log(`'git init' stdout:\n${stdout}`);
+        } catch (error) {
+            console.error(`'git init' failed in ${repoDir}.`);
+            console.error(`Stdout: ${error.stdout?.toString()}`);
+            console.error(`Stderr: ${error.stderr?.toString()}`);
+            throw error;
+        }
         
         // Add remote
         console.log(`Adding remote for ${repoUrl}...`);
-        execSync(`git remote add origin ${repoUrl}`, { cwd: repoDir });
+        try {
+            const stdout = execSync(`git remote add origin ${repoUrl}`, { cwd: repoDir });
+            console.log(`'git remote add origin' stdout:\n${stdout}`);
+        } catch (error) {
+            console.error(`'git remote add origin ${repoUrl}' failed in ${repoDir}.`);
+            console.error(`Stdout: ${error.stdout?.toString()}`);
+            console.error(`Stderr: ${error.stderr?.toString()}`);
+            throw error;
+        }
         
         // Configure sparse checkout
         console.log('Configuring sparse checkout...');
-        execSync('git config core.sparseCheckout true', { cwd: repoDir });
+        try {
+            const stdout = execSync('git config core.sparseCheckout true', { cwd: repoDir });
+            console.log(`'git config core.sparseCheckout true' stdout:\n${stdout}`);
+        } catch (error) {
+            console.error(`'git config core.sparseCheckout true' failed in ${repoDir}.`);
+            console.error(`Stdout: ${error.stdout?.toString()}`);
+            console.error(`Stderr: ${error.stderr?.toString()}`);
+            throw error;
+        }
         
         // Write sparse checkout patterns to .git/info/sparse-checkout
         const sparseCheckoutFile = path.join(repoDir, '.git', 'info', 'sparse-checkout');
@@ -54,8 +92,26 @@ async function sparseCheckout(repoUrl, patterns, branch = 'main') {
         
         // Fetch and checkout the specified branch
         console.log(`Fetching and checking out ${branch} branch...`);
-        execSync(`git fetch --depth=1 origin ${branch}`, { cwd: repoDir });
-        execSync(`git checkout origin/${branch}`, { cwd: repoDir });
+        try {
+            const stdout = execSync(`git fetch --depth=1 origin ${branch}`, { cwd: repoDir });
+            console.log(`'git fetch --depth=1 origin ${branch}' stdout:\n${stdout}`);
+        } catch (error) {
+            console.error(`'git fetch --depth=1 origin ${branch}' failed in ${repoDir}.`);
+            console.error(`Stdout: ${error.stdout?.toString()}`);
+            console.error(`Stderr: ${error.stderr?.toString()}`);
+            throw error;
+        }
+        // Checkout the remote tracking branch (e.g., 'origin/main') into a detached HEAD state.
+        // This is suitable for temporary read-only access as it avoids creating a local branch.
+        try {
+            const stdout = execSync(`git checkout origin/${branch}`, { cwd: repoDir });
+            console.log(`'git checkout origin/${branch}' stdout:\n${stdout}`);
+        } catch (error) {
+            console.error(`'git checkout origin/${branch}' failed in ${repoDir}.`);
+            console.error(`Stdout: ${error.stdout?.toString()}`);
+            console.error(`Stderr: ${error.stderr?.toString()}`);
+            throw error;
+        }
         
         console.log(`Repository checked out to ${repoDir}`);
         return repoDir;
@@ -119,11 +175,20 @@ async function fetchSingleFile(repoUrl, filePath, branch = 'main') {
             if (content !== null) {
                 return content;
             } else {
-                throw lastError || new Error(`Failed to fetch file "${filePath}" from any branch`);
+                const attemptedBranches = branchesToTry.join(', ');
+                const repoId = repoOwner && repoName ? `${repoOwner}/${repoName}` : repoUrl;
+                let errorMessage = `Failed to fetch file "${filePath}" from ${repoId} (tried branches: ${attemptedBranches}).`;
+                if (lastError) {
+                    errorMessage += ` Last error: ${lastError.message}`;
+                }
+                // Ensure a default error if lastError is somehow null, though the logic implies it should be set.
+                throw new Error(errorMessage || `Failed to fetch file "${filePath}" from ${repoId} after trying branches: ${attemptedBranches}. Unknown error.`);
             }
         } catch (error) {
+            // The error thrown from the try block will now be more specific for GitHub failures.
+            // This catch block will log it and rethrow, preserving the detailed message.
             console.error(`[ERROR] Failed to fetch file from GitHub: ${error.message}`);
-            throw new Error(`Failed to fetch file from GitHub: ${error.message}`);
+            throw error; // Rethrow the original error which now contains more details
         }
     } else {
         try {
