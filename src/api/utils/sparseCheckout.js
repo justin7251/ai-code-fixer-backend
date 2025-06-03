@@ -46,7 +46,7 @@ async function sparseCheckout(repoUrl, patterns, branch = 'main') {
         // Create temp directory if it doesn't exist (this is for TEMP_DIR itself)
         await fs.mkdir(TEMP_DIR, { recursive: true });
 
-        // Create the unique repository directory. 
+        // Create the unique repository directory.
         // No need to check for existence or pre-remove, as it's unique.
         await fs.mkdir(repoDir, { recursive: true });
         

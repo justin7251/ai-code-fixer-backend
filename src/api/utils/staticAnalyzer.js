@@ -323,7 +323,7 @@ async function runESLint(directory, options = {}) {
             );
         }
         
-        // ESLint is expected to be available either locally in the project's node_modules/.bin 
+        // ESLint is expected to be available either locally in the project's node_modules/.bin
         // or globally in the system PATH. No automatic global installation will be attempted.
         // If not found locally, eslintPath remains 'eslint', relying on system PATH.
         // If execPromise fails because eslint is not in PATH, the error will propagate.
