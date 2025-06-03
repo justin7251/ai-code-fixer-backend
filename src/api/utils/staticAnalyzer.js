@@ -19,7 +19,9 @@ const analyzers = {
  * Runs static code analysis with different tools based on language
  * @param {string} repoUrl - URL of the GitHub repository
  * @param {string} language - Language to analyze
- * @param {Object} options - Additional options
+ * @param {Object} [options={}] - Additional options.
+ * @param {string[]} [options.specificFiles] - Optional. Used by the internal sparse checkout to target specific files or patterns instead of language-based defaults.
+ * @param {*} [options.*] - Other properties within options may be passed down to the language-specific analyzer functions (e.g., options for ESLint, PMD).
  * @returns {Promise<Object>} Analysis results
  */
 async function analyzeCode(repoUrl, language, options = {}) {
@@ -49,7 +51,7 @@ async function analyzeCode(repoUrl, language, options = {}) {
         const results = await analyzer(tempDir, options);
         
         // Process results to a standard format
-        const standardResults = standardizeResults(results, language);
+        const standardResults = standardizeResults(results, language, tempDir);
         console.log(`standardResults:  ${standardResults}`);
         // Add file contents for files with issues (for AI fixing)
         await addFileContents(standardResults, tempDir);
@@ -117,10 +119,6 @@ async function sparseCheckout(repoUrl, fullTargetDirPath, language, specificFile
  
         git = simpleGit({
             baseDir: fullTargetDirPath,
-            binary: 'C:/Program Files/Git/bin/git.exe',
-            unsafe: {
-                allowUnsafeCustomBinary: true
-            },
             // You can add a timeout for Git commands if they often hang
             timeout: {
                 block: 10000
@@ -173,8 +171,9 @@ async function sparseCheckout(repoUrl, fullTargetDirPath, language, specificFile
             }
             console.log(`[BRANCH_RESOLVED] Will fetch and checkout branch: ${actualBranch}`);
         } catch (branchError) {
-            console.warn(`[WARN] Could not determine remote branches: ${branchError.message}. Proceeding with initial branch: ${branch}. This might indicate network or authentication issues.`);
-            // Proceed with the initial `branch` value.
+            console.error(`[ERROR] Could not determine remote branches during sparse checkout for ${repoUrl}: ${branchError.message}. Cannot verify branch existence.`);
+            // Re-throw the original error or a new one to make the failure explicit
+            throw new Error(`Failed to verify remote branches: ${branchError.message}`);
         }
 
         // 10. Fetch the remote repository (shallow clone for efficiency)
@@ -294,7 +293,9 @@ async function addFileContents(results, directory) {
 /**
  * Run ESLint on a directory
  * @param {string} directory - Directory to analyze
- * @param {Object} options - ESLint options
+ * @param {Object} [options={}] - ESLint options.
+ * @param {string} [options.fileExtension] - Optional. Comma-separated file extensions for ESLint to check (e.g., 'js,jsx' or 'ts,tsx').
+ * @param {boolean} [options.typescript] - Optional. If true, implies TypeScript files and sets a default `fileExtension` to 'ts,tsx' if `options.fileExtension` is not provided.
  * @returns {Promise<Object>} ESLint results
  */
 async function runESLint(directory, options = {}) {
@@ -322,12 +323,11 @@ async function runESLint(directory, options = {}) {
             );
         }
         
-        // Install ESLint if not available
-        if (!hasLocalESLint && (await execPromise('which eslint').then(() => false).catch(() => true))) {
-            console.log('ESLint not found, installing globally...');
-            await execPromise('npm install -g eslint');
-        }
-        
+        // ESLint is expected to be available either locally in the project's node_modules/.bin
+        // or globally in the system PATH. No automatic global installation will be attempted.
+        // If not found locally, eslintPath remains 'eslint', relying on system PATH.
+        // If execPromise fails because eslint is not in PATH, the error will propagate.
+
         // Determine file extensions to check
         const fileExtension = options.fileExtension || (options.typescript ? 'ts,tsx' : 'js,jsx');
         
@@ -350,7 +350,8 @@ async function runESLint(directory, options = {}) {
 /**
  * Run PMD on a directory
  * @param {string} directory - Directory to analyze
- * @param {Object} options - PMD options
+ * @param {Object} [options={}] - PMD options.
+ * @param {string} [options.rulesets] - Optional. Comma-separated string of PMD rulesets to use. Defaults to 'category/java/bestpractices.xml,category/java/errorprone.xml'.
  * @returns {Promise<Object>} PMD results
  */
 async function runPMD(directory, options = {}) {
@@ -377,16 +378,20 @@ async function runPMD(directory, options = {}) {
 /**
  * Run PyLint on a directory
  * @param {string} directory - Directory to analyze
- * @param {Object} options - PyLint options
+ * @param {Object} [options={}] - PyLint options. Currently, no specific properties from the `options` object are used by this function.
  * @returns {Promise<Object>} PyLint results
  */
 async function runPyLint(directory, options = {}) {
     try {
-        // Check if PyLint is installed
-        await execPromise('which pylint').catch(async () => {
-            console.log('PyLint not found, installing...');
-            await execPromise('pip install pylint');
-        });
+        // Check if PyLint is installed and available in PATH
+        // PyLint is expected to be installed and available in the system PATH.
+        // No automatic global installation will be attempted.
+        try {
+            await execPromise('which pylint');
+        } catch (error) {
+            console.error('PyLint not found in PATH. Please ensure PyLint is installed and accessible.');
+            throw new Error('PyLint not found in PATH. Please ensure PyLint is installed and accessible.');
+        }
         
         // Run PyLint with JSON reporter
         console.log(`Running PyLint on ${directory}`);
@@ -410,7 +415,7 @@ async function runPyLint(directory, options = {}) {
 /**
  * Run PHP_CodeSniffer on a directory
  * @param {string} directory - Directory to analyze
- * @param {Object} options - PHP_CodeSniffer options
+ * @param {Object} [options={}] - PHP_CodeSniffer options. Currently, no specific properties from the `options` object are used by this function.
  * @returns {Promise<Object>} PHP_CodeSniffer results
  */
 async function runPHPLint(directory, options = {}) {
@@ -444,9 +449,10 @@ async function runPHPLint(directory, options = {}) {
  * Standardize results from different tools into a common format
  * @param {Object} results - Analysis results from a specific tool
  * @param {string} language - Language that was analyzed
+ * @param {string} baseDirectory - The base directory for the analysis, used for path normalization.
  * @returns {Object} Standardized results
  */
-function standardizeResults(results, language) {
+function standardizeResults(results, language, baseDirectory) {
     const standardResults = {
         tool: '',
         language,
@@ -470,7 +476,7 @@ function standardizeResults(results, language) {
             // Process messages
             results.forEach(file => {
                 // Normalize file path
-                const relativeFilePath = normalizePath(file.filePath);
+                const relativeFilePath = normalizePath(file.filePath, baseDirectory);
                 
                 console.log(`relativeFilePath:  ${relativeFilePath}`);
 
@@ -495,7 +501,7 @@ function standardizeResults(results, language) {
             if (results.files) {
                 // Process Java issues from PMD
                 results.files.forEach(file => {
-                    const relativeFilePath = normalizePath(file.filename);
+                    const relativeFilePath = normalizePath(file.filename, baseDirectory);
                     
                     (file.violations || []).forEach(violation => {
                         const severity = getSeverityFromPriority(violation.priority);
@@ -525,7 +531,7 @@ function standardizeResults(results, language) {
             
             // Process Python issues from PyLint
             results.forEach(issue => {
-                const relativeFilePath = normalizePath(issue.path);
+                const relativeFilePath = normalizePath(issue.path, baseDirectory);
                 const severity = getPyLintSeverity(issue.type);
                 
                 standardResults.issues.push({
@@ -556,7 +562,7 @@ function standardizeResults(results, language) {
             // Process PHP issues from PHP_CodeSniffer
             if (results.files) {
                 Object.keys(results.files).forEach(filePath => {
-                    const relativeFilePath = normalizePath(filePath);
+                    const relativeFilePath = normalizePath(filePath, baseDirectory);
                     const fileData = results.files[filePath];
                     
                     if (fileData.messages && fileData.messages.length > 0) {
@@ -606,33 +612,36 @@ function standardizeResults(results, language) {
 }
 
 /**
- * Normalize a file path to a consistent format
- * @param {string} filePath - File path to normalize
- * @returns {string} Normalized path
+ * Normalize a file path to a consistent format, making it relative to the baseDirectory.
+ * @param {string} filePath - File path to normalize.
+ * @param {string} baseDirectory - The base directory for the analysis.
+ * @returns {string} Normalized and relativized path, or 'unknown' if filePath is falsy.
  */
-function normalizePath(filePath) {
+function normalizePath(filePath, baseDirectory) {
     if (!filePath) return 'unknown';
-    
-    // Replace backslashes with forward slashes
-    let normalized = filePath.replace(/\\/g, '/');
-    
-    // Remove any absolute path elements
-    const parts = normalized.split('/');
-    const rootDirIndex = parts.findIndex(p => 
-        p === 'src' || 
-        p === 'lib' || 
-        p === 'app' || 
-        p === 'test'
-    );
-    
-    if (rootDirIndex !== -1) {
-        normalized = parts.slice(rootDirIndex).join('/');
-    } else {
-        // Just get the filename if we can't determine the project structure
-        normalized = parts[parts.length - 1];
+
+    // Always use forward slashes for consistency internally
+    let normalizedFilePath = filePath.replace(/\\/g, '/');
+    const normalizedBaseDirectory = baseDirectory ? baseDirectory.replace(/\\/g, '/') : null;
+
+    if (normalizedBaseDirectory && path.isAbsolute(normalizedFilePath)) {
+        let relativePath = path.relative(normalizedBaseDirectory, normalizedFilePath);
+        relativePath = relativePath.replace(/\\/g, '/'); // Ensure forward slashes in output
+
+        // If the path is outside the base directory (e.g., starts with '../'),
+        // it might indicate an issue or an unexpected file.
+        // Fall back to basename to avoid exposing external paths.
+        if (relativePath.startsWith('../')) {
+            console.warn(`[WARN] File path ${normalizedFilePath} is outside the base directory ${normalizedBaseDirectory}. Falling back to basename.`);
+            return path.basename(normalizedFilePath);
+        }
+        return relativePath;
     }
     
-    return normalized;
+    // If filePath is not absolute, or baseDirectory is not provided,
+    // assume filePath is already relative or a simple filename.
+    // Ensure it uses forward slashes.
+    return normalizedFilePath;
 }
 
 /**
