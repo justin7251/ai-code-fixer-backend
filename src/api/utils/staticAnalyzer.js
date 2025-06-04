@@ -506,14 +506,20 @@ function standardizeResults(results, language, baseDirectory) {
                     (file.violations || []).forEach(violation => {
                         const severity = getSeverityFromPriority(violation.priority);
                         
-                        standardResults.issues.push({
+                        const issue = { // Create an issue object
                             file: relativeFilePath,
                             line: violation.beginline,
                             column: violation.begincolumn,
                             severity,
                             rule: violation.rule,
                             message: violation.description || violation.msg
-                        });
+                        };
+
+                        if (violation.suggestion) { // Check for suggestion
+                            issue.pmdSuggestion = violation.suggestion; // Add it to the issue object
+                        }
+
+                        standardResults.issues.push(issue); // Add the modified issue object
                         
                         // Update counts based on severity
                         if (severity === 'error') {
