@@ -300,50 +300,89 @@ async function addFileContents(results, directory) {
  */
 async function runESLint(directory, options = {}) {
     try {
-        // Check if ESLint is installed locally in the project
         const hasLocalESLint = await checkFileExists(path.join(directory, 'node_modules', '.bin', 'eslint'));
         let eslintPath = hasLocalESLint ? 
             path.join(directory, 'node_modules', '.bin', 'eslint') : 
-            'eslint'; // Use global ESLint
-        
-        // Check for ESLint config
-        const hasESLintConfig = await hasAnyFile(directory, [
-            '.eslintrc.js', '.eslintrc.json', '.eslintrc.yml', '.eslintrc'
-        ]);
-        
-        // Set up a default ESLint config if none exists
-        if (!hasESLintConfig) {
-            await fs.writeFile(
-                path.join(directory, '.eslintrc.json'), 
-                JSON.stringify({
-                    "env": { "browser": true, "es2021": true, "node": true },
-                    "extends": "eslint:recommended",
-                    "parserOptions": { "ecmaVersion": "latest", "sourceType": "module" }
-                }, null, 2)
-            );
-        }
-        
-        // ESLint is expected to be available either locally in the project's node_modules/.bin
-        // or globally in the system PATH. No automatic global installation will be attempted.
-        // If not found locally, eslintPath remains 'eslint', relying on system PATH.
-        // If execPromise fails because eslint is not in PATH, the error will propagate.
+            'eslint';
 
-        // Determine file extensions to check
+        let eslintConfigOption = '';
+        let customConfigProvided = false;
+
+        if (options.eslint && typeof options.eslint.configFile === 'string' && options.eslint.configFile.trim() !== '') {
+            customConfigProvided = true;
+            const customConfigPath = path.join(directory, options.eslint.configFile.trim());
+
+            // Security: Ensure the resolved custom config path is within the project directory
+            const normalizedDirectory = path.resolve(directory);
+            const normalizedCustomConfigPath = path.resolve(customConfigPath);
+            if (!normalizedCustomConfigPath.startsWith(normalizedDirectory + path.sep) && normalizedCustomConfigPath !== normalizedDirectory) {
+                console.error(`Security Alert: ESLint config path '${options.eslint.configFile.trim()}' resolves to '${normalizedCustomConfigPath}' which is outside of project directory '${normalizedDirectory}'`);
+                throw new Error("Invalid ESLint config path: attempts to access outside of project directory.");
+            }
+
+            eslintConfigOption = `--config "${customConfigPath}"`; // Ensure quotes for paths with spaces
+            console.log(`Using custom ESLint config: ${customConfigPath}`);
+        }
+
+        // Check for common ESLint config files if no custom config is specified via options
+        if (!customConfigProvided) {
+            const hasStandardESLintConfig = await hasAnyFile(directory, [
+                '.eslintrc.js', '.eslintrc.json', '.eslintrc.yml', '.eslintrc', 'eslint.config.js' // Added eslint.config.js for flat config
+            ]);
+            if (!hasStandardESLintConfig) {
+                // Set up a default ESLint config only if no custom config is provided AND no standard config exists
+                const defaultConfigPath = path.join(directory, '.eslintrc.json');
+                await fs.writeFile(
+                    defaultConfigPath,
+                    JSON.stringify({
+                        "env": { "browser": true, "es2021": true, "node": true },
+                        "extends": "eslint:recommended",
+                        "parserOptions": { "ecmaVersion": "latest", "sourceType": "module" }
+                    }, null, 2)
+                );
+                console.log(`Created default ESLint config at: ${defaultConfigPath}`);
+            }
+        }
+
         const fileExtension = options.fileExtension || (options.typescript ? 'ts,tsx' : 'js,jsx');
         
-        // Run ESLint
+        // Construct the command, ensuring proper spacing for the config option
+        const commandParts = [
+            eslintPath,
+            `"${directory}"`, // Quote directory path
+            `--ext ${fileExtension}`,
+            '-f json'
+        ];
+        if (eslintConfigOption) {
+            commandParts.push(eslintConfigOption);
+        }
+        const eslintCommand = commandParts.join(' ');
+
         console.log(`Running ESLint on ${directory} with extensions: ${fileExtension}`);
-        const { stdout } = await execPromise(
-            `${eslintPath} ${directory} --ext ${fileExtension} -f json`
-        );
+        console.log(`Executing ESLint command: ${eslintCommand}`); // Log the full command
+        const { stdout } = await execPromise(eslintCommand);
         
         return JSON.parse(stdout);
     } catch (error) {
-        console.error('ESLint error:', error);
-        if (error.stderr && error.stderr.includes('not found')) {
-            throw new Error('ESLint not installed. Please run npm install -g eslint');
+        console.error('ESLint error:', error.message); // Log error message
+        if (error.stderr) console.error('ESLint stderr:', error.stderr);
+        if (error.stdout) console.error('ESLint stdout (on error):', error.stdout); // stdout might contain info on parse errors
+
+        // Check if error is due to ESLint not being installed
+        if (error.message && (error.message.includes('eslint: not found') || error.message.includes('ENOENT'))) {
+            throw new Error('ESLint not installed or not found in PATH. Please ensure ESLint is installed globally or locally in the project.');
         }
-        throw error;
+        // If ESLint exits with stdout (often JSON containing errors, but non-zero exit code), try to parse it.
+        // This handles cases where ESLint finds linting errors and exits with a non-zero code, but still outputs valid JSON.
+        if (error.stdout) {
+            try {
+                console.warn('ESLint exited with an error, but stdout was found. Attempting to parse stdout as JSON.');
+                return JSON.parse(error.stdout);
+            } catch (parseError) {
+                console.error('Failed to parse ESLint stdout as JSON after error:', parseError.message);
+            }
+        }
+        throw new Error(`ESLint execution failed: ${error.message}`);
     }
 }
 
@@ -359,7 +398,27 @@ async function runPMD(directory, options = {}) {
     const PMD_PATH = process.env.PMD_PATH || '/usr/local/pmd/bin/pmd';
     
     // Default rulesets
-    const rulesets = options.rulesets || 'category/java/bestpractices.xml,category/java/errorprone.xml';
+    let rulesets = 'category/java/bestpractices.xml,category/java/errorprone.xml'; // Default value
+    if (options.pmd && options.pmd.rulesets && typeof options.pmd.rulesets === 'string' && options.pmd.rulesets.trim() !== '') {
+        const customRulesetPaths = options.pmd.rulesets.split(',').map(p => p.trim()).filter(p => p !== '');
+        for (const p of customRulesetPaths) {
+            const isUrl = p.startsWith('http://') || p.startsWith('https://');
+            const isPmdCategory = p.startsWith('category/'); // e.g. category/java/bestpractices.xml
+            // Allow URLs and PMD category-style paths
+            if (!isUrl && !isPmdCategory) {
+                // For file paths, disallow absolute paths and path traversal
+                if (path.isAbsolute(p)) {
+                    console.error(`Security Alert: Absolute PMD ruleset path detected: '${p}'`);
+                    throw new Error(`Invalid PMD ruleset path: '${p}'. Absolute paths are not allowed for custom rulesets.`);
+                }
+                if (p.includes('..')) {
+                    console.error(`Security Alert: Path traversal detected in PMD ruleset path: '${p}'`);
+                    throw new Error(`Invalid PMD ruleset path: '${p}'. Path traversal ('..') is not allowed.`);
+                }
+            }
+        }
+        rulesets = customRulesetPaths.join(','); // Use the trimmed and validated paths
+    }
     
     // Run PMD
     console.log(`Running PMD on ${directory} with ruleset: ${rulesets}`);
