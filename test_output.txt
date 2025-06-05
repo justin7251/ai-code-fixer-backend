@@ -1,0 +1,69 @@
+--- Starting PMD Test Scenarios ---
+
+--- Scenario P1: Default: options = {} ---
+Outcome: Rulesets for command = "category/java/bestpractices.xml,category/java/errorprone.xml"
+Expected: Uses default rulesets. -> Met: true
+
+--- Scenario P2: Valid custom (single): options = {"pmd":{"rulesets":"custom/myrules.xml"}} ---
+Outcome: Rulesets for command = "custom/myrules.xml"
+Expected: Uses "custom/myrules.xml". -> Met: true
+
+--- Scenario P3: Valid custom (comma-separated, trimmed): options = {"pmd":{"rulesets":" custom/rules1.xml , custom/rules2.xml "}} ---
+Outcome: Rulesets for command = "custom/rules1.xml,custom/rules2.xml"
+Expected: Uses "custom/rules1.xml,custom/rules2.xml". -> Met: true
+
+--- Scenario P4: Valid URL: options = {"pmd":{"rulesets":"http://example.com/rules.xml"}} ---
+Outcome: Rulesets for command = "http://example.com/rules.xml"
+Expected: Uses "http://example.com/rules.xml". -> Met: true
+
+--- Scenario P5: Path traversal: options = {"pmd":{"rulesets":"../secrets/rules.xml"}} ---
+Outcome: Error - Invalid PMD ruleset path: ../secrets/rules.xml. Path traversal (..) is not allowed.
+Expected: Throws security error for path traversal. -> Met: true
+
+--- Scenario P6: Absolute path: options = {"pmd":{"rulesets":"/etc/secret_rules.xml"}} ---
+Outcome: Error - Invalid PMD ruleset path: /etc/secret_rules.xml. Absolute paths are not allowed for custom rulesets.
+Expected: Throws security error for absolute path. -> Met: true
+
+--- Scenario P7: Mixed valid and invalid traversal: options = {"pmd":{"rulesets":"custom/myrules.xml,../invalid.xml"}} ---
+Outcome: Error - Invalid PMD ruleset path: ../invalid.xml. Path traversal (..) is not allowed.
+Expected: Throws security error for path traversal. -> Met: true
+
+--- Scenario P8: Empty ruleset string: options = {"pmd":{"rulesets":"   "}} ---
+Outcome: Rulesets for command = "category/java/bestpractices.xml,category/java/errorprone.xml"
+Expected: Uses default rulesets. -> Met: true
+
+--- Scenario P9: Non-empty but effectively empty ruleset string: options = {"pmd":{"rulesets":",, ,"}} ---
+Log: Custom PMD ruleset string was non-empty but resulted in no valid paths after processing. Using default.
+Outcome: Rulesets for command = "category/java/bestpractices.xml,category/java/errorprone.xml"
+Log: Custom PMD ruleset string was non-empty but resulted in no valid paths after processing. Using default.
+Expected: Uses default rulesets (logged warning). -> Met: true
+
+--- Starting ESLint Test Scenarios ---
+
+--- Scenario E1: Default, no existing config: options = {} ---
+Log: Mocked fs.writeFile for default .eslintrc.json in /tmp/project
+Outcome: eslintConfigOption = ""
+Default Config Creation Log: Mocked fs.writeFile for default .eslintrc.json in /tmp/project
+Expected: No specific config option, default config created. -> Met: true
+
+--- Scenario E1.1: Default, standard config exists: options = {} ---
+Log: Standard ESLint config found, default creation skipped.
+Outcome: eslintConfigOption = ""
+Expected: No specific config option, default config NOT created. -> Met: true
+
+--- Scenario E2: Valid custom config: options = {"eslint":{"configFile":".my-eslint.json"}} ---
+Log: Using custom ESLint config: /tmp/project/.my-eslint.json
+Outcome: eslintConfigOption = "--config "/tmp/project/.my-eslint.json""
+Expected: Uses --config "/tmp/project/.my-eslint.json". -> Met: true
+
+--- Scenario E3: Path traversal: options = {"eslint":{"configFile":"../.my-eslint.json"}} ---
+Outcome: Error - Invalid ESLint config path: attempts to access outside of project directory.
+Expected: Throws security error for ESLint path traversal. -> Met: true
+
+--- Scenario E4: Empty custom config string, no existing config: options = {"eslint":{"configFile":"   "}} ---
+Log: Mocked fs.writeFile for default .eslintrc.json in /tmp/project
+Outcome: eslintConfigOption = ""
+Default Config Creation Log: Mocked fs.writeFile for default .eslintrc.json in /tmp/project
+Expected: No specific config option, default config created. -> Met: true
+
+All tests completed.
