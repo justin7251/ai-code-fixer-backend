@@ -61,49 +61,83 @@ router.post('/analyze', async (req, res) => {
         // Run analysis asynchronously
         console.log(`Starting code quality analysis for ${repositoryUrl} with language ${language}`);
         
+        let analysisId; // Declare analysisId here to be accessible in catch block
         try {
-            // Run the code analysis
-            const results = await analyzeCode(repositoryUrl, language, options);
-            
-            // Save results to database
-            const analysisData = {
+            // 1. Create initial analysis record in Firestore
+            const initialAnalysisData = {
                 repositoryUrl,
                 language,
-                tool: results.tool,
-                userId: req.user?.id,
-                summary: results.summary,
-                createdAt: admin.firestore.FieldValue.serverTimestamp()
+                userId: req.user?.id, // Ensure req.user is populated by your auth middleware
+                status: 'processing',
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
             };
+            const analysisRef = await db.collection('code_quality_analysis').add(initialAnalysisData);
+            analysisId = analysisRef.id;
+            console.log(`Initial analysis record created with ID: ${analysisId} for ${repositoryUrl}`);
+
+            // 2. Run the actual code analysis
+            const results = await analyzeCode(repositoryUrl, language, options);
             
-            // Split issues into a separate collection to handle large datasets
+            // 3. Store issues in a separate collection
             const issuesCollection = db.collection('code_quality_issues');
-            const issuesRef = await issuesCollection.add({
+            const issuesDocData = {
+                analysisId: analysisId, // Link back to the main analysis document
                 repositoryUrl,
                 issues: results.issues,
-                createdAt: admin.firestore.FieldValue.serverTimestamp()
-            });
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            };
+            if (results.fileContents) { // Store file contents if available
+                issuesDocData.fileContents = results.fileContents;
+            }
+            const issuesRef = await issuesCollection.add(issuesDocData);
             
-            // Add reference to issues collection
-            analysisData.issuesRef = issuesRef.id;
+            // 4. Update the analysis record with results and status 'completed'
+            const finalAnalysisData = {
+                tool: results.tool,
+                summary: results.summary,
+                issuesRef: issuesRef.id, // Store reference to the issues document
+                status: 'completed',
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            };
+            await db.collection('code_quality_analysis').doc(analysisId).update(finalAnalysisData);
             
-            // Save the analysis metadata
-            const analysisRef = await db.collection('code_quality_analysis').add(analysisData);
-            
-            console.log(`Code quality analysis saved with ID: ${analysisRef.id}`);
+            console.log(`Code quality analysis ${analysisId} completed and results saved.`);
+
         } catch (error) {
-            console.error('Code analysis error:', error);
-            // Since we've already sent a response, we can't send another one
-            // Log the error for server-side debugging
+            // This catch block handles errors from analyzeCode or Firestore operations after initial record creation
+            console.error(`Error during asynchronous code analysis for ${repositoryUrl} (Analysis ID: ${analysisId || 'N/A'}):`, error);
+            if (analysisId) {
+                // If an initial record was created, update it to 'failed'
+                try {
+                    await db.collection('code_quality_analysis').doc(analysisId).update({
+                        status: 'failed',
+                        error: {
+                            message: error.message,
+                            stack: error.stack || 'Not available',
+                            details: JSON.stringify(error, Object.getOwnPropertyNames(error)) // Capture more error details
+                        },
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    });
+                    console.log(`Analysis ${analysisId} marked as 'failed' in Firestore.`);
+                } catch (dbError) {
+                    console.error(`Failed to update analysis ${analysisId} to 'failed' state:`, dbError);
+                }
+            }
+            // Since a 202 response has already been sent, we just log the error.
+            // The client should poll the analysis status using its ID.
         }
     } catch (error) {
-        console.error('Code analysis request error:', error);
-        // This catch only runs if the initial request processing fails
-        // If we haven't sent a response yet, send one now
-        return res.status(500).json({
-            success: false,
-            message: 'Failed to start code analysis',
-            error: error.message
-        });
+        // This catch block handles errors in the initial request processing (before 202 is sent)
+        console.error('Initial code analysis request processing error:', error);
+        // If headers haven't been sent, send an error response
+        if (!res.headersSent) {
+            return res.status(500).json({
+                success: false,
+                message: 'Failed to start code analysis due to an internal error.',
+                error: error.message
+            });
+        }
     }
 });
 
@@ -113,93 +147,109 @@ router.post('/analyze/:repositoryId', async (req, res) => {
         const repositoryId = req.params.repositoryId;
         const { language, options } = req.body;
         
-        // Get repository info from the database
-        const repoDoc = await db.collection('repositories').doc(repositoryId).get();
-        
+        // TODO: Securely fetch repository details and URL.
+        // For now, using a placeholder as in the original code.
+        // const repoDoc = await db.collection('repositories').doc(repositoryId).get();
         // if (!repoDoc.exists) {
-        //     return res.status(404).json({
-        //         success: false,
-        //         message: 'Repository not found'
-        //     });
+        //     return res.status(404).json({ success: false, message: 'Repository not found' });
         // }
-        
         // const repoData = repoDoc.data();
-        
-        // // Check if user has access to this repository
-        // if (repoData.userId !== req.user?.id) {
-        //     return res.status(403).json({
-        //         success: false,
-        //         message: 'Access denied'
-        //     });
+        // const repositoryUrl = repoData.url || repoData.html_url;
+        // const repositoryName = repoData.name;
+        // if (repoData.userId !== req.user?.id) { // Check access
+        //     return res.status(403).json({ success: false, message: 'Access denied' });
         // }
+        const repositoryUrl = "https://github.com/justin7251/aj-inventory-system"; // Placeholder
+        const repositoryName = "aj-inventory-system"; // Placeholder name
         
-        //const repositoryUrl = repoData.url || repoData.html_url;
-        const repositoryUrl = "https://github.com/justin7251/aj-inventory-system";
+        // Default language if not provided or detected (original logic was 'javascript')
+        const detectedLanguage = language || 'javascript';
         
-        // Detect language if not specified
-        // let detectedLanguage = language;
-        // if (!detectedLanguage && repoData.language) {
-        //     detectedLanguage = repoData.language.toLowerCase();
-        // } else {
-        //     detectedLanguage = 'javascript'; // Default
-        // }
-
-        const detectedLanguage = 'javascript';
-        
-        // Send immediate response
+        // Send immediate 202 Accepted response
         res.status(202).json({
             success: true,
             message: 'Code analysis started',
             repositoryId,
             language: detectedLanguage
+            // analysisId will be created shortly, client might need to query for it or be given a way to find it
         });
         
-        // Run analysis asynchronously
-        console.log(`Starting code quality analysis for repository ${repositoryId} with language ${detectedLanguage}`);
+        // Asynchronous processing starts here
+        console.log(`Starting code quality analysis for repository ${repositoryId} (${repositoryUrl}) with language ${detectedLanguage}`);
         
+        let analysisId; // Declare analysisId for use in catch block
         try {
-            // Run the code analysis
-            const results = await analyzeCode(repositoryUrl, detectedLanguage, options);
-            
-            // Save results to database
-            const analysisData = {
+            // 1. Create initial analysis record in Firestore
+            const initialAnalysisData = {
                 repositoryId,
                 repositoryUrl,
-                repositoryName: repoData.name,
+                repositoryName, // Add repository name
                 language: detectedLanguage,
-                tool: results.tool,
-                userId: req.user?.id,
-                summary: results.summary,
-                createdAt: admin.firestore.FieldValue.serverTimestamp()
+                userId: req.user?.id, // Ensure req.user is populated
+                status: 'processing',
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
             };
+            const analysisRef = await db.collection('code_quality_analysis').add(initialAnalysisData);
+            analysisId = analysisRef.id;
+            console.log(`Initial analysis record created with ID: ${analysisId} for repository ${repositoryId}`);
+
+            // 2. Run the actual code analysis
+            const results = await analyzeCode(repositoryUrl, detectedLanguage, options);
             
-            // Split issues into a separate collection to handle large datasets
+            // 3. Store issues in a separate collection
             const issuesCollection = db.collection('code_quality_issues');
-            const issuesRef = await issuesCollection.add({
+            const issuesDocData = {
+                analysisId: analysisId,
                 repositoryId,
                 issues: results.issues,
-                createdAt: admin.firestore.FieldValue.serverTimestamp()
-            });
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            };
+            if (results.fileContents) {
+                issuesDocData.fileContents = results.fileContents;
+            }
+            const issuesRef = await issuesCollection.add(issuesDocData);
             
-            // Add reference to issues collection
-            analysisData.issuesRef = issuesRef.id;
+            // 4. Update the analysis record with results and status 'completed'
+            const finalAnalysisData = {
+                tool: results.tool,
+                summary: results.summary,
+                issuesRef: issuesRef.id,
+                status: 'completed',
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            };
+            await db.collection('code_quality_analysis').doc(analysisId).update(finalAnalysisData);
             
-            // Save the analysis metadata
-            const analysisRef = await db.collection('code_quality_analysis').add(analysisData);
-            
-            console.log(`Code quality analysis saved with ID: ${analysisRef.id}`);
+            console.log(`Code quality analysis ${analysisId} for repository ${repositoryId} completed and results saved.`);
+
         } catch (error) {
-            console.error('Code analysis error:', error);
-            // Since we've already sent a response, we can't send another one
-            // Log the error for server-side debugging
+            console.error(`Error during asynchronous code analysis for repository ${repositoryId} (Analysis ID: ${analysisId || 'N/A'}):`, error);
+            if (analysisId) {
+                try {
+                    await db.collection('code_quality_analysis').doc(analysisId).update({
+                        status: 'failed',
+                        error: {
+                            message: error.message,
+                            stack: error.stack || 'Not available',
+                            details: JSON.stringify(error, Object.getOwnPropertyNames(error))
+                        },
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    });
+                    console.log(`Analysis ${analysisId} for repository ${repositoryId} marked as 'failed' in Firestore.`);
+                } catch (dbError) {
+                    console.error(`Failed to update analysis ${analysisId} (repository ${repositoryId}) to 'failed' state:`, dbError);
+                }
+            }
         }
     } catch (error) {
-        console.error('Code analysis request error:', error);
-        return res.status(500).json({
-            success: false,
-            message: 'Failed to start code analysis',
-            error: error.message
-        });
+        console.error('Initial code analysis request processing error for repository ID:', error);
+        if (!res.headersSent) {
+            return res.status(500).json({
+                success: false,
+                message: 'Failed to start code analysis for repository due to an internal error.',
+                error: error.message
+            });
+        }
     }
 });
 
