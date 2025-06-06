@@ -345,44 +345,67 @@ async function runESLint(directory, options = {}) {
         }
 
         const fileExtension = options.fileExtension || (options.typescript ? 'ts,tsx' : 'js,jsx');
+        const cachePath = path.join(directory, '.eslintcache');
         
         // Construct the command, ensuring proper spacing for the config option
         const commandParts = [
             eslintPath,
             `"${directory}"`, // Quote directory path
             `--ext ${fileExtension}`,
-            '-f json'
+            '-f json',
+            '--cache', // Enable caching
+            `--cache-location "${cachePath}"` // Specify cache location
         ];
         if (eslintConfigOption) {
             commandParts.push(eslintConfigOption);
         }
         const eslintCommand = commandParts.join(' ');
 
-        console.log(`Running ESLint on ${directory} with extensions: ${fileExtension}`);
+        console.log(`Running ESLint on ${directory} with extensions: ${fileExtension} and cache path: ${cachePath}`);
         console.log(`Executing ESLint command: ${eslintCommand}`); // Log the full command
-        const { stdout } = await execPromise(eslintCommand);
         
-        return JSON.parse(stdout);
-    } catch (error) {
-        console.error('ESLint error:', error.message); // Log error message
-        if (error.stderr) console.error('ESLint stderr:', error.stderr);
-        if (error.stdout) console.error('ESLint stdout (on error):', error.stdout); // stdout might contain info on parse errors
+        try {
+            const { stdout } = await execPromise(eslintCommand);
+            return JSON.parse(stdout);
+        } catch (error) {
+            console.error('ESLint execution encountered an error:', error); // Log the full error object
 
-        // Check if error is due to ESLint not being installed
-        if (error.message && (error.message.includes('eslint: not found') || error.message.includes('ENOENT'))) {
-            throw new Error('ESLint not installed or not found in PATH. Please ensure ESLint is installed globally or locally in the project.');
-        }
-        // If ESLint exits with stdout (often JSON containing errors, but non-zero exit code), try to parse it.
-        // This handles cases where ESLint finds linting errors and exits with a non-zero code, but still outputs valid JSON.
-        if (error.stdout) {
-            try {
-                console.warn('ESLint exited with an error, but stdout was found. Attempting to parse stdout as JSON.');
-                return JSON.parse(error.stdout);
-            } catch (parseError) {
-                console.error('Failed to parse ESLint stdout as JSON after error:', parseError.message);
+            if (error.stderr) {
+                console.error('ESLint stderr:', error.stderr);
             }
+            if (error.stdout) {
+                console.error('ESLint stdout (on error):', error.stdout);
+            }
+
+            // Specific error for ESLint not found
+            if (error.code === 'ENOENT' || (error.message && error.message.includes('eslint: not found'))) {
+                throw new Error('Error: ESLint executable not found. Please ensure ESLint is installed and in your PATH.');
+            }
+
+            // Attempt to parse stdout if ESLint exited with an error but provided JSON output (linting violations)
+            // ESLint typically exits with code 1 for linting errors.
+            if (error.stdout && typeof error.stdout === 'string' && error.stdout.trim().startsWith('{')) {
+                console.warn('ESLint exited with a non-zero code, but stdout appears to be JSON. Attempting to parse for linting violations.');
+                try {
+                    return JSON.parse(error.stdout);
+                } catch (parseError) {
+                    console.error('Failed to parse ESLint stdout as JSON after non-zero exit:', parseError.message);
+                    // Fall through to more generic error message
+                }
+            }
+
+            // Check for potential configuration errors (often indicated in stderr)
+            // This is a heuristic. A more robust check might involve specific exit codes or messages.
+            if (error.stderr && (error.stderr.includes('Configuration error') || error.stderr.includes('Cannot find module') || error.stderr.includes('Parsing error'))) {
+                throw new Error(`Error: ESLint configuration error. Details: ${error.stderr}`);
+            }
+
+            // Generic ESLint execution failure
+            const exitCode = error.code || 'N/A';
+            const stderrOutput = error.stderr || 'N/A';
+            const stdoutOutput = error.stdout || 'N/A';
+            throw new Error(`Error: ESLint execution failed. Exit code: ${exitCode}. Stderr: ${stderrOutput}. Stdout: ${stdoutOutput}`);
         }
-        throw new Error(`ESLint execution failed: ${error.message}`);
     }
 }
 
