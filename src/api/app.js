@@ -7,6 +7,7 @@ const repositoriesRouter = require('./routes/repositories');
 const projectsRouter = require('./routes/projects');
 const authRouter = require('./routes/auth');
 const analysisRouter = require('./routes/analysis');
+const codeActionsRouter = require('./routes/codeActions'); // Added
 const protectedRoutes = require('./routes/protected');
 const codeQualityRouter = require('./routes/code-quality');
 
@@ -36,6 +37,7 @@ app.use('/api/auth', authRouter);
 app.use('/api/repositories', authMiddleware, repositoriesRouter);
 app.use('/api/projects', authMiddleware, projectsRouter);
 app.use('/api/analysis', authMiddleware, analysisRouter);
+app.use('/api/code-actions', authMiddleware, codeActionsRouter); // Added
 app.use('/api/protected', protectedRoutes);
 app.use('/api/code-quality', authMiddleware, codeQualityRouter);
 
@@ -54,6 +56,8 @@ app.use('/api', (req, res, next) => {
 app.use(['/api/repositories', '/repositories'], repositoriesRouter);
 app.use(['/api/projects', '/projects'], projectsRouter);
 app.use(['/api/analysis', '/analysis'], analysisRouter);
+// Also add the new route to the list that supports both /api and direct
+app.use(['/api/code-actions', '/code-actions'], codeActionsRouter); // Added
 app.use(['/api/code-quality', '/code-quality'], codeQualityRouter);
 
 // Error handling for JSON parsing errors
