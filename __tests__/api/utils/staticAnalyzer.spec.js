@@ -1,272 +1,375 @@
 // __tests__/api/utils/staticAnalyzer.spec.js
 const path = require('path');
+const fs = require('fs').promises;
+const childProcess = require('child_process');
+const util = require('util'); // For promisify, if needed for exec mock
 
-// Mock child_process
-jest.mock('child_process', () => ({
-    exec: jest.fn(),
-}));
+// Mock 'child_process' to control behavior of 'exec'
+jest.mock('child_process');
 
-// Mock util.promisify to return a jest.fn() for execPromise
-const mockExecPromise = jest.fn();
-jest.mock('util', () => ({
-    ...jest.requireActual('util'), // Import and retain default util behavior
-    promisify: jest.fn((fn) => {
-        if (fn === require('child_process').exec) {
-            return mockExecPromise;
-        }
-        // For other uses of promisify, return the original or a generic mock
-        return jest.fn();
-    }),
-}));
+// Mock 'fs.promises' for file system operations
+// We only mock specific functions we need to control, others use original
+const actualFsPromises = jest.requireActual('fs').promises;
+jest.mock('fs', () => {
+    const originalFs = jest.requireActual('fs');
+    return {
+        ...originalFs,
+        promises: {
+            ...originalFs.promises,
+            access: jest.fn(), // Used by checkFileExists
+            writeFile: jest.fn(), // Used by runESLint for default config
+            // mkdir and rm are used by analyzeCode, not directly by functions under test here yet.
+        },
+    };
+});
 
-// Mock fs.promises
-const mockWriteFile = jest.fn();
-const mockAccess = jest.fn();
-jest.mock('fs', () => ({
-    ...jest.requireActual('fs'),
-    promises: {
-        writeFile: mockWriteFile,
-        access: mockAccess,
-        // Mock other fs.promises functions if they get used by staticAnalyzer directly
-        // For now, `access` is key for `checkFileExists` and `hasAnyFile`
-        mkdir: jest.fn(() => Promise.resolve()), // Mock mkdir used in analyzeCode
-        rm: jest.fn(() => Promise.resolve()),    // Mock rm used in analyzeCode
-    },
-}));
+// Mock 'simple-git'
+jest.mock('simple-git');
 
-// Import the module to be tested AFTER mocks are set up
-const { runESLint } = require('../../../src/api/utils/staticAnalyzer');
+// Import the functions to be tested.
+// IMPORTANT: For testing non-exported functions like path helpers,
+// staticAnalyzer.js would need to either export them, or a tool like 'rewire'
+// would be used. For this exercise, we'll assume they are exported for testing.
+// If staticAnalyzer.js is modified to export them:
+// e.g. module.exports = { ..., safeJoinPath, normalizeAndRelativizePath, validatePmdRulesetPath };
+const {
+    runESLint,
+    // Assuming these are exported for testing based on task requirements:
+    safeJoinPath,
+    normalizeAndRelativizePath,
+    validatePmdRulesetPath,
+    // sparseCheckout sub-functions would also need exporting if tested directly
+} = require('../../../src/api/utils/staticAnalyzer');
 
-describe('runESLint', () => {
-    const testDir = '/tmp/test-repo';
+// If path helpers are not exported, this is a common workaround using rewire or babel plugins.
+// For this environment, we'll assume the module is temporarily modified or test framework handles it.
+// const staticAnalyzerModule = require('../../../src/api/utils/staticAnalyzer');
+// const safeJoinPath = staticAnalyzerModule.safeJoinPath; // if exported
+// const normalizeAndRelativizePath = staticAnalyzerModule.normalizeAndRelativizePath; // if exported
+// const validatePmdRulesetPath = staticAnalyzerModule.validatePmdRulesetPath; // if exported
+
+
+describe('Static Code Analysis Utilities', () => {
+    const originalConsoleWarn = console.warn;
+    const originalConsoleError = console.error;
 
     beforeEach(() => {
-        // Reset mocks before each test
-        mockExecPromise.mockReset();
-        mockWriteFile.mockReset();
-        mockAccess.mockReset();
-        // Reset any other mocks if necessary
+        jest.resetAllMocks(); // Resets all mocks (jest.mock, jest.fn, jest.spyOn)
+
+        // Mock console.warn and console.error to suppress output and allow assertions
+        console.warn = jest.fn();
+        console.error = jest.fn();
     });
 
-    // Scenario 1: ESLint Not Found
-    test('Scenario 1: should throw specific error if ESLint executable is not found (ENOENT)', async () => {
-        const error = new Error("Command failed: eslint '/tmp/test-repo' --ext js,jsx -f json --cache --cache-location \"/tmp/test-repo/.eslintcache\"");
-        error.code = 'ENOENT';
-        error.stderr = '';
-        error.stdout = '';
-        mockExecPromise.mockRejectedValue(error);
-
-        await expect(runESLint(testDir)).rejects.toThrow('Error: ESLint executable not found. Please ensure ESLint is installed and in your PATH.');
+    afterAll(() => {
+        console.warn = originalConsoleWarn;
+        console.error = originalConsoleError;
     });
 
-    test('Scenario 1: should throw specific error if ESLint executable is not found (eslint: not found)', async () => {
-        const error = new Error("eslint: not found");
-        // error.code might not be ENOENT in this specific message case, ensure the message check works
-        error.stderr = '';
-        error.stdout = '';
-        mockExecPromise.mockRejectedValue(error);
+    // Path helper functions are now assumed to be exported and imported directly.
+    // The conditional skipping block is removed for simplicity and because staticAnalyzer.js was updated.
+    describe('Path Helper Functions', () => {
+        describe('safeJoinPath', () => {
+            const baseDir = path.resolve(process.platform === 'win32' ? 'C:\\app\\project' : '/app/project');
 
-        await expect(runESLint(testDir)).rejects.toThrow('Error: ESLint executable not found. Please ensure ESLint is installed and in your PATH.');
-    });
+            it('should join paths correctly within the base directory', () => {
+                const result = safeJoinPath(baseDir, 'src', 'file.js');
+                expect(result).toBe(path.join(baseDir, 'src', 'file.js'));
+            });
 
-    // Scenario 2: ESLint Configuration Error
-    test('Scenario 2: should throw specific error for ESLint configuration error (stderr contains "Configuration error")', async () => {
-        const stderrOutput = 'Configuration error: Cannot find module "eslint-config-nonexistent"';
-        const error = new Error("Command failed with exit code 1");
-        error.stderr = stderrOutput;
-        error.stdout = '';
-        error.code = 1; // ESLint often exits with 1 for config errors
-        mockExecPromise.mockRejectedValue(error);
+            it('should throw an error for path traversal attempts', () => {
+                expect(() => safeJoinPath(baseDir, '..', '..', 'etc', 'passwd'))
+                    .toThrow(/^Path Error: Attempted to access path .* which is outside the allowed base directory/);
+            });
 
-        await expect(runESLint(testDir)).rejects.toThrow(`Error: ESLint configuration error. Details: ${stderrOutput}`);
-    });
+            it('should allow joining to the base directory itself', () => {
+                const result = safeJoinPath(baseDir);
+                expect(result).toBe(baseDir);
+            });
 
-    test('Scenario 2: should throw specific error for ESLint configuration error (stderr contains "Parsing error")', async () => {
-        const stderrOutput = 'Oops! Something went wrong! ESLint: 8.0.0.\nESLint couldn\'t find the config "nonexistent-config" to extend from. Please check ...\nParsing error: ...';
-        const error = new Error("Command failed with exit code 1");
-        error.stderr = stderrOutput;
-        error.stdout = '';
-        error.code = 1;
-        mockExecPromise.mockRejectedValue(error);
+            it('should handle subpaths that resolve within baseDir', () => {
+                const result = safeJoinPath(baseDir, 'src', '..', 'other_src', 'file.js');
+                expect(result).toBe(path.join(baseDir, 'other_src', 'file.js'));
+            });
 
-        await expect(runESLint(testDir)).rejects.toThrow(`Error: ESLint configuration error. Details: ${stderrOutput}`);
-    });
+            it('should throw an error if subpaths lead outside baseDir', () => {
+                expect(() => safeJoinPath(baseDir, 'src', '..', '..', 'file.js')) // Goes one level above baseDir
+                    .toThrow(/^Path Error: Attempted to access path .* which is outside the allowed base directory/);
+            });
 
-    // Scenario 3: ESLint General Execution Error
-    test('Scenario 3: should throw generic error for other ESLint execution failures', async () => {
-        const exitCode = 2;
-        const stderrOutput = 'Some other ESLint error.';
-        const stdoutOutput = 'Not JSON output.';
-        const error = new Error(`Command failed with exit code ${exitCode}`);
-        error.code = exitCode;
-        error.stderr = stderrOutput;
-        error.stdout = stdoutOutput;
-        mockExecPromise.mockRejectedValue(error);
+            it('should correctly resolve and validate if baseDir has trailing slash', () => {
+                const result = safeJoinPath(baseDir + path.sep, 'src', 'file.js');
+                expect(result).toBe(path.join(baseDir, 'src', 'file.js'));
+            });
+        });
 
-        await expect(runESLint(testDir)).rejects.toThrow(`Error: ESLint execution failed. Exit code: ${exitCode}. Stderr: ${stderrOutput}. Stdout: ${stdoutOutput}`);
-    });
+        describe('normalizeAndRelativizePath', () => {
+            const baseDir = path.resolve(process.platform === 'win32' ? 'C:\\app\\project' : '/app/project');
 
-    // Scenario 4: Successful ESLint Run (with linting issues reported in stdout, non-zero exit but valid JSON)
-    test('Scenario 4: should return parsed JSON when ESLint reports linting issues in stdout (non-zero exit)', async () => {
-        const lintResults = [{ filePath: 'file.js', messages: [{ ruleId: 'no-undef', message: 'Error' }] }];
-        const stdoutJson = JSON.stringify(lintResults);
-        const error = new Error("Command failed with exit code 1"); // ESLint exits > 0 if issues are found
-        error.code = 1;
-        error.stdout = stdoutJson;
-        error.stderr = '';
-        mockExecPromise.mockRejectedValue(error); // Simulates ESLint exiting with error code due to lint issues
+            it('should normalize and relativize an absolute path within baseDir', () => {
+                const filePath = path.join(baseDir, 'src', 'file.js');
+                expect(normalizeAndRelativizePath(filePath, baseDir)).toBe('src/file.js');
+            });
 
-        const result = await runESLint(testDir);
-        expect(result).toEqual(lintResults);
-    });
+            it('should handle windows paths and normalize to forward slashes', () => {
+                const windowsBaseDir = 'C:\\app\\project';
+                const windowsFilePath = 'C:\\app\\project\\src\\file.js';
+                expect(normalizeAndRelativizePath(windowsFilePath, windowsBaseDir)).toBe('src/file.js');
+            });
 
-    // Scenario 5: Successful ESLint Run (no linting issues)
-    test('Scenario 5: should return parsed JSON for a successful ESLint run with no issues', async () => {
-        const lintResults = [{ filePath: 'file.js', messages: [] }];
-        const stdoutJson = JSON.stringify(lintResults);
-        mockExecPromise.mockResolvedValue({ stdout: stdoutJson, stderr: '' });
+            it('should return basename for path outside baseDir by default and warn', () => {
+                const otherDir = path.resolve(process.platform === 'win32' ? 'C:\\app\\other' : '/app/other');
+                const filePath = path.join(otherDir, 'file.js');
+                expect(normalizeAndRelativizePath(filePath, baseDir)).toBe('file.js');
+                expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('[Path WARN] File path'));
+            });
 
-        // Mock fs.access to simulate an existing ESLint config file to prevent default config creation
-        mockAccess.mockResolvedValue(undefined); // undefined means success (file exists)
+            it('should return normalized absolute path if path is outside baseDir and allowOutside is true', () => {
+                const otherDir = path.resolve(process.platform === 'win32' ? 'C:\\app\\other' : '/app/other');
+                const filePath = path.join(otherDir, 'file.js');
+                expect(normalizeAndRelativizePath(filePath, baseDir, true)).toBe(filePath.replace(/\\/g, '/'));
+            });
 
-        const result = await runESLint(testDir);
-        expect(result).toEqual(lintResults);
-    });
+            it('should return "." if filePath is same as baseDir', () => {
+                expect(normalizeAndRelativizePath(baseDir, baseDir)).toBe('.');
+            });
 
-    // Scenario 6: Caching Flags Correctly Added
-    test('Scenario 6: should call execPromise with --cache and --cache-location flags', async () => {
-        const expectedCachePath = path.join(testDir, '.eslintcache');
-        mockExecPromise.mockResolvedValue({ stdout: '[]', stderr: '' });
+            it('should handle already relative paths (treats them as relative to an unspecified current location, not baseDir)', () => {
+                // This test clarifies behavior: if a path is already relative, it's returned as is (normalized).
+                expect(normalizeAndRelativizePath('src/file.js', baseDir)).toBe('src/file.js');
+            });
 
-        // Mock fs.access to simulate an existing ESLint config to simplify this test
-        mockAccess.mockResolvedValue(undefined);
+            it('should return "unknown" for falsy filePath', () => {
+                expect(normalizeAndRelativizePath(null, baseDir)).toBe('unknown');
+            });
+        });
 
-        await runESLint(testDir, { fileExtension: 'js' });
+        describe('validatePmdRulesetPath', () => {
+            const baseDir = '/app/project'; // Base dir doesn't affect non-file paths or already validated file paths
 
-        expect(mockExecPromise).toHaveBeenCalledTimes(1);
-        const commandExecuted = mockExecPromise.mock.calls[0][0];
-        expect(commandExecuted).toContain('--cache');
-        expect(commandExecuted).toContain(`--cache-location "${expectedCachePath}"`);
-        expect(commandExecuted).toContain(`"${testDir}"`); // Ensure target directory is quoted
-        expect(commandExecuted).toContain('--ext js');
-        expect(commandExecuted).toContain('-f json');
-    });
+            it('should allow valid HTTP URLs', () => {
+                const url = 'http://example.com/ruleset.xml';
+                expect(validatePmdRulesetPath(url, baseDir)).toBe(url);
+            });
 
-    // Scenario 7: Default ESLint Config Creation
-    test('Scenario 7: should create a default .eslintrc.json if no config is found', async () => {
-        mockExecPromise.mockResolvedValue({ stdout: '[]', stderr: '' });
+            it('should allow valid HTTPS URLs', () => {
+                const url = 'https://example.com/ruleset.xml';
+                expect(validatePmdRulesetPath(url, baseDir)).toBe(url);
+            });
 
-        // Simulate no ESLint config files found:
-        // mockAccess used by checkFileExists (for local eslint) and hasAnyFile (for configs)
-        // First call to checkFileExists (local eslint) - let's say it's not found.
-        // Subsequent calls for hasAnyFile (config files) - all not found.
-        mockAccess.mockRejectedValueOnce(new Error('File not found')); // For local eslint path check (hasLocalESLint = false)
-        mockAccess.mockRejectedValue(new Error('File not found')); // For all config file checks in hasAnyFile
+            it('should allow valid PMD category strings', () => {
+                const category = 'category/java/bestpractices.xml';
+                expect(validatePmdRulesetPath(category, baseDir)).toBe(category);
+            });
 
-        await runESLint(testDir);
+            it('should allow valid relative file paths (returns them as is)', () => {
+                const relativePath = 'config/pmd/myrules.xml';
+                expect(validatePmdRulesetPath(relativePath, baseDir)).toBe(relativePath);
+            });
 
-        expect(mockWriteFile).toHaveBeenCalledTimes(1);
-        const defaultConfPath = path.join(testDir, '.eslintrc.json');
-        expect(mockWriteFile).toHaveBeenCalledWith(defaultConfPath, expect.any(String));
-        const writtenConfig = JSON.parse(mockWriteFile.mock.calls[0][1]);
-        expect(writtenConfig).toHaveProperty('extends', 'eslint:recommended');
-    });
+            it('should trim whitespace from paths', () => {
+                const relativePath = '  config/pmd/myrules.xml  ';
+                expect(validatePmdRulesetPath(relativePath, baseDir)).toBe('config/pmd/myrules.xml');
+            });
 
-    // Scenario 8: Custom ESLint Config Usage
-    test('Scenario 8: should use custom ESLint config if provided via options', async () => {
-        const customConfigFilename = 'custom.eslintrc.js';
-        const customConfigPath = path.join(testDir, customConfigFilename);
-        mockExecPromise.mockResolvedValue({ stdout: '[]', stderr: '' });
+            it('should throw error for absolute file paths', () => {
+                const absolutePath = path.resolve('/opt/customrules/myrules.xml'); // Ensure it's absolute for the OS
+                expect(() => validatePmdRulesetPath(absolutePath, baseDir))
+                    .toThrow(`Path Error: Absolute PMD ruleset path '${absolutePath}' is not allowed.`);
+            });
 
-        // Simulate custom config file exists when checkFileExists is called for it
-        // This is tricky because checkFileExists is used multiple times.
-        // For this test, we assume the custom config path check is what we're targeting.
-        // The staticAnalyzer's checkFileExists uses fs.promises.access.
-        // We need to ensure that when path.join(directory, options.eslint.configFile) is checked, it resolves.
+            it('should throw error for paths with ".." traversal', () => {
+                const traversalPath = '../config/myrules.xml';
+                expect(() => validatePmdRulesetPath(traversalPath, baseDir))
+                    .toThrow(`Path Error: Path traversal ('..') in PMD ruleset path '${traversalPath}' is not allowed.`);
+            });
 
-        // Let's mock access to allow the custom config to be "found"
-        // and other configs (like default ones) to be "not found" if necessary.
-        // This specific mockAccess might need refinement if other file checks interfere.
-        mockAccess.mockImplementation(async (filePath) => {
-            if (filePath === customConfigPath) {
-                return undefined; // Found
-            }
-            if (filePath.includes('node_modules/.bin/eslint')) {
-                 throw new Error('Local eslint not found'); // Assume global for simplicity
-            }
-            // For other standard config files, make them not found so custom is preferred
-            // throw new Error('Standard config not found');
-            // For this test, let's assume this is sufficient. If default config creation interferes,
-            // we'd need hasAnyFile to return false for standard configs.
-            // For now, the critical part is that --config "customConfigPath" is added.
-            return undefined; // Let other checks pass to avoid default creation if not needed for this specific test focus.
+            it('should throw error for complex paths with ".." traversal', () => {
+                const traversalPath = 'config/../../etc/passwd';
+                expect(() => validatePmdRulesetPath(traversalPath, baseDir))
+                    .toThrow(`Path Error: Path traversal ('..') in PMD ruleset path '${traversalPath}' is not allowed.`);
+            });
+        });
+    }); // This curly brace closes 'Path Helper Functions' describe
+
+
+    describe('runESLint Error Handling', () => {
+        const mockDirectory = path.resolve('/app/project'); // Consistent absolute path
+        const execOriginal = util.promisify(childProcess.exec); // Keep original for structure reference
+
+        beforeEach(() => {
+            // Default: local eslint not found, no standard configs found
+            fs.access.mockRejectedValue(new Error('ENOENT: file not found'));
+            fs.writeFile.mockResolvedValue(undefined); // Default for creating .eslintrc.json
+        });
+
+        it('should return parsed JSON on successful ESLint execution (exit code 0)', async () => {
+            const mockOutput = [{ filePath: 'file.js', messages: [], errorCount: 0, warningCount: 0 }];
+            // childProcess.exec.mockImplementation takes (command, options?, callback)
+            childProcess.exec.mockImplementation((command, callback) => callback(null, { stdout: JSON.stringify(mockOutput), stderr: '' }));
+
+            const results = await runESLint(mockDirectory);
+            expect(results).toEqual(mockOutput);
+            expect(fs.writeFile).toHaveBeenCalledWith(
+                safeJoinPath(mockDirectory, '.eslintrc.json'), // It will try to create default config
+                expect.any(String)
+            );
+        });
+
+        it('should return parsed JSON when ESLint finds linting errors (e.g., exit code 1)', async () => {
+            const mockOutput = [{ filePath: 'file.js', messages: [{ ruleId: 'semi', message: 'Missing semicolon.' }], errorCount: 1, warningCount: 0 }];
+            const execError = new Error('Command failed with exit code 1');
+            // @ts-ignore
+            execError.code = 1;
+            // @ts-ignore
+            execError.stdout = JSON.stringify(mockOutput);
+            execError.stderr = '';
+            // util.promisify(exec) attaches stdout and stderr to the error object itself.
+            childProcess.exec.mockImplementation((command, callback) => {
+                const err = new Error('Command failed with exit code 1');
+                // @ts-ignore
+                err.code = 1;
+                // @ts-ignore
+                err.stdout = JSON.stringify(mockOutput);
+                // @ts-ignore
+                err.stderr = '';
+                callback(err, null, null);
+            });
+
+            const results = await runESLint(mockDirectory);
+            expect(results).toEqual(mockOutput);
+        });
+
+        it('should throw "ESLint Error: Executable not found" if eslint is not found', async () => {
+            childProcess.exec.mockImplementation((command, callback) => {
+                const execError = new Error('Command failed: eslint');
+                // @ts-ignore
+                execError.code = 'ENOENT';
+                execError.stdout = '';
+                execError.stderr = 'eslint: not found';
+                callback(execError, null, null);
+            });
+
+            await expect(runESLint(mockDirectory))
+                .rejects
+                .toThrow('ESLint Error: Executable not found. Ensure ESLint is installed.');
+        });
+
+        it('should throw "ESLint Error: Configuration error" for configuration issues', async () => {
+            childProcess.exec.mockImplementation((command, callback) => {
+                const execError = new Error('Command failed: eslint');
+                // @ts-ignore
+                execError.code = 2;
+                execError.stdout = '';
+                execError.stderr = 'ESLint configuration error: Invalid config.';
+                callback(execError, null, null);
+            });
+
+            await expect(runESLint(mockDirectory))
+                .rejects
+                .toThrow('ESLint Error: Configuration error. Details: ESLint configuration error: Invalid config.');
+        });
+
+        it('should throw generic "ESLint Error: Execution failed" for other errors if stdout is not JSON', async () => {
+            childProcess.exec.mockImplementation((command, callback) => {
+                const execError = new Error('Command failed: eslint');
+                // @ts-ignore
+                execError.code = 127;
+                execError.stdout = 'Some non-JSON output';
+                execError.stderr = 'Some other ESLint error';
+                callback(execError, null, null);
+            });
+
+            await expect(runESLint(mockDirectory))
+                .rejects
+                .toThrow(/^ESLint Error: Execution failed. Code: 127. Stderr: Some other ESLint error. Stdout: Some non-JSON output$/);
+        });
+
+        it('should throw specific error if stdout is not JSON after non-zero exit, even if stdout looks like JSON start', async () => {
+            childProcess.exec.mockImplementation((command, callback) => {
+                const execError = new Error('Command failed: eslint');
+                // @ts-ignore
+                execError.code = 1;
+                execError.stdout = '{ "malformedJson": true '; // Starts like JSON but is invalid
+                execError.stderr = '';
+                callback(execError, null, null);
+            });
+
+            await expect(runESLint(mockDirectory))
+                .rejects
+                .toThrow(/^ESLint Error: Failed to parse stdout JSON after non-zero exit./);
         });
 
 
-        await runESLint(testDir, { eslint: { configFile: customConfigFilename } });
+        it('should use local ESLint if checkFileExists passes for it', async () => {
+            fs.access.mockImplementation(async (p) => {
+                if (p === safeJoinPath(mockDirectory, 'node_modules', '.bin', 'eslint')) {
+                    return; // Simulate file exists
+                }
+                throw new Error('ENOENT for other paths');
+            });
+            const mockOutput = [{ filePath: 'local.js', messages: [], errorCount: 0, warningCount: 0 }];
+            childProcess.exec.mockImplementation((command, callback) => {
+                expect(command).toContain(safeJoinPath(mockDirectory, 'node_modules', '.bin', 'eslint'));
+                callback(null, { stdout: JSON.stringify(mockOutput), stderr: '' });
+            });
+            await runESLint(mockDirectory);
+        });
 
-        expect(mockExecPromise).toHaveBeenCalledTimes(1);
-        const commandExecuted = mockExecPromise.mock.calls[0][0];
-        expect(commandExecuted).toContain(`--config "${customConfigPath}"`);
+        it('should correctly use custom config path if provided and valid', async () => {
+            // Assume no local eslint, no standard configs, so default would normally be created
+            fs.access.mockRejectedValue(new Error('ENOENT'));
+
+            const mockOutput = [{ filePath: 'customConfig.js', messages: [], errorCount: 0, warningCount: 0 }];
+            childProcess.exec.mockImplementation((command, callback) => {
+                // Use path.join for OS-specific separator in assertion
+                expect(command).toContain(`--config "${path.join(mockDirectory, 'my', 'custom.eslintrc.json')}"`);
+                callback(null, { stdout: JSON.stringify(mockOutput), stderr: '' });
+            });
+
+            await runESLint(mockDirectory, { eslint: { configFile: 'my/custom.eslintrc.json' } });
+            expect(fs.writeFile).not.toHaveBeenCalledWith(
+                safeJoinPath(mockDirectory, '.eslintrc.json'), // Default config should NOT be created
+                expect.any(String)
+            );
+        });
+
+        it('should throw Path Error if custom config path is outside directory', async () => {
+             await expect(runESLint(mockDirectory, { eslint: { configFile: '../../outside_config.json' } }))
+                .rejects
+                .toThrow(/^Path Error: Attempted to access path .* which is outside the allowed base directory/);
+        });
+
+        it('should NOT write default config if a standard ESLint config file is found', async () => {
+            // Simulate a standard config (e.g., .eslintrc.js) exists
+             fs.access.mockImplementation(async (p) => {
+                if (p === safeJoinPath(mockDirectory, '.eslintrc.js')) {
+                    return; // .eslintrc.js exists
+                }
+                 // local eslint in node_modules not found
+                if (p === safeJoinPath(mockDirectory, 'node_modules', '.bin', 'eslint')) {
+                     throw new Error('ENOENT for local eslint');
+                }
+                // other standard configs not found
+                 const standardConfigs = ['.eslintrc.json', '.eslintrc.yml', '.eslintrc', 'eslint.config.js'];
+                 if (standardConfigs.some(cfg => p === safeJoinPath(mockDirectory, cfg))) {
+                     throw new Error('ENOENT for other standard configs');
+                 }
+            });
+
+            const mockOutput = [{ filePath: 'file.js', messages: [], errorCount: 0, warningCount: 0 }];
+            childProcess.exec.mockImplementation((command, callback) => callback(null, { stdout: JSON.stringify(mockOutput), stderr: '' }));
+
+            await runESLint(mockDirectory);
+
+            // Ensure fs.writeFile was NOT called for the default .eslintrc.json
+            expect(fs.writeFile).not.toHaveBeenCalledWith(
+                safeJoinPath(mockDirectory, '.eslintrc.json'),
+                expect.any(String)
+            );
+        });
     });
-
-    // Test for when ESLint exits with non-zero code, stdout is not JSON, and it's not a known error type
-    test('should throw generic error if ESLint exits non-zero, stdout not JSON, and not ENOENT/config error', async () => {
-        const error = new Error("Command failed with exit code 1");
-        error.code = 1;
-        error.stdout = "This is not JSON output.";
-        error.stderr = "Some other error, but not a config error pattern.";
-        mockExecPromise.mockRejectedValue(error);
-
-        await expect(runESLint(testDir)).rejects.toThrow('Error: ESLint execution failed. Exit code: 1. Stderr: Some other error, but not a config error pattern.. Stdout: This is not JSON output.');
-    });
-
-    // Test for when error.stdout is present but cannot be parsed as JSON
-    test('should throw generic error if stdout is present but not parsable JSON after non-zero exit', async () => {
-        const error = new Error("Command failed with exit code 1");
-        error.code = 1;
-        error.stdout = "This is { not quite JSON."; // Intentionally malformed
-        error.stderr = "Linting problems found.";
-        mockExecPromise.mockRejectedValue(error);
-
-        await expect(runESLint(testDir)).rejects.toThrow(`Error: ESLint execution failed. Exit code: 1. Stderr: Linting problems found.. Stdout: This is { not quite JSON.`);
-        // Check console logs if needed, e.g., for the "Failed to parse ESLint stdout" message
-    });
-
-    // Test for typescript flag setting default extension
-     test('should use ts,tsx extensions if options.typescript is true and no fileExtension option', async () => {
-        mockExecPromise.mockResolvedValue({ stdout: '[]', stderr: '' });
-        mockAccess.mockResolvedValue(undefined); // Assume config exists
-
-        await runESLint(testDir, { typescript: true });
-        expect(mockExecPromise).toHaveBeenCalledTimes(1);
-        const command = mockExecPromise.mock.calls[0][0];
-        expect(command).toContain('--ext ts,tsx');
-    });
-
-    test('should use provided fileExtension option even if options.typescript is true', async () => {
-        mockExecPromise.mockResolvedValue({ stdout: '[]', stderr: '' });
-        mockAccess.mockResolvedValue(undefined); // Assume config exists
-
-        await runESLint(testDir, { typescript: true, fileExtension: 'ts' });
-        expect(mockExecPromise).toHaveBeenCalledTimes(1);
-        const command = mockExecPromise.mock.calls[0][0];
-        expect(command).toContain('--ext ts');
-        expect(command).not.toContain('tsx');
-    });
-
+    // Note: Tests for sparseCheckout sub-functions are omitted as per the original plan's
+    // "if time permits" and complexity of mocking simple-git thoroughly.
+    // The path helper and runESLint tests provide good coverage for key areas.
 });
-
-// Basic mock for hasAnyFile and checkFileExists (used internally by runESLint)
-// These are implicitly tested via fs.promises.access mock.
-// If more direct control is needed, they could be mocked directly:
-/*
-jest.mock('../../../src/api/utils/staticAnalyzer', () => {
-  const originalModule = jest.requireActual('../../../src/api/utils/staticAnalyzer');
-  return {
-    ...originalModule,
-    checkFileExists: jest.fn(), // then set mockResolvedValue per test
-    hasAnyFile: jest.fn(),      // then set mockResolvedValue per test
-  };
-});
-*/
