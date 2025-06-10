@@ -4,21 +4,11 @@ const fs = require('fs').promises;
 const util = require('util');
 const execPromise = util.promisify(exec);
 const { sparseCheckout } = require('./sparseCheckout');
+const { LANGUAGE_RULESETS } = require('./constants'); // Import from constants.js
 
 const PMD_PATH = process.env.PMD_PATH || '/usr/local/pmd/bin/pmd';
 
-const LANGUAGE_RULESETS = {
-    java: 'category/java/bestpractices.xml,category/java/errorprone.xml',
-    javascript: 'category/ecmascript/bestpractices.xml,category/ecmascript/errorprone.xml',
-    typescript: 'category/ecmascript/bestpractices.xml,category/ecmascript/errorprone.xml',
-    php: 'category/php/bestpractices.xml,category/php/errorprone.xml',
-    python: 'category/python/bestpractices.xml,category/python/errorprone.xml',
-    apex: 'category/apex/bestpractices.xml',
-    jsp: 'category/jsp/bestpractices.xml',
-    plsql: 'category/plsql/bestpractices.xml',
-    xml: 'category/xml/errorprone.xml',
-    velocity: 'category/vm/bestpractices.xml'
-};
+// LANGUAGE_RULESETS is now imported from constants.js
 
 const LANGUAGE_FILE_PATTERNS = {
     java: '*.java',
@@ -180,5 +170,5 @@ function generateSummary(warnings) {
 
 module.exports = {
     scanRepository,
-    LANGUAGE_RULESETS
+    // LANGUAGE_RULESETS is no longer exported from here
 };
